@@ -406,7 +406,9 @@ class ActorTurn(_ContentBoundModel):
             raise ValueError(
                 f"stages cannot be both captured and unavailable: {names}"
             )
-        for stage, view in self.activations.items():
+        # pylint mis-infers the Field(default_factory=dict) descriptor as a
+        # FieldInfo; at runtime this is a validated dict (see tests).
+        for stage, view in self.activations.items():  # pylint: disable=no-member
             if view.capture_stage is not stage:
                 raise ValueError(
                     f"activation keyed {stage.value} carries stage "

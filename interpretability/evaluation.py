@@ -4975,6 +4975,7 @@ Example: yes, yes'''
                 'scenario': scenario,
                 'incentive_condition': sample.incentive_condition,
                 'emergent_ground_truth': sample.emergent_ground_truth,
+                'scenario_params': dict(sample.scenario_params),
                 'actual_deception': sample.actual_deception,
                 'perceived_deception': sample.perceived_deception,
                 'modules_enabled': list(sample.modules_enabled),
