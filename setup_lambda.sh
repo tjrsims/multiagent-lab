@@ -37,7 +37,7 @@ if [ -d "multiagent-lab" ]; then
     cd multiagent-lab && git pull --quiet
     echo -e "${GREEN}✓ Repository updated${NC}"
 else
-    git clone --quiet https://github.com/asimsmadeit/multiagent-lab.git
+    git clone --quiet https://github.com/Gadfly-Research/multiagent-lab.git
     cd multiagent-lab
     echo -e "${GREEN}✓ Repository cloned${NC}"
 fi
