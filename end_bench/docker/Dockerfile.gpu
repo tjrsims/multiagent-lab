@@ -1,0 +1,51 @@
+# END-Bench white-box image (GPU). Runs the existing `deception run --hybrid`
+# capture path for open models plus `end-bench build`. Requires the NVIDIA
+# container toolkit on the host.
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3.12 python3.12-venv python3-pip git build-essential ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN python3.12 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /workspace
+
+RUN pip install --upgrade pip \
+ && pip install "torch>=2.0,<3.0" --index-url https://download.pytorch.org/whl/cu126
+
+# Dependencies first (cached layer): read them from pyproject so the list has
+# one source of truth, then install the project itself without re-resolving.
+COPY pyproject.toml README.md ./
+RUN python - <<'PYDEPS' > /tmp/requirements.txt
+import tomllib
+project = tomllib.load(open("pyproject.toml", "rb"))["project"]
+deps = [d for d in project["dependencies"] if not d.lower().startswith("torch")]
+deps += project["optional-dependencies"]["aws"]
+deps += project["optional-dependencies"]["dev"]  # pytest/pylint so `pytest` works in-container
+print("\n".join(deps))
+PYDEPS
+RUN pip install -r /tmp/requirements.txt
+
+COPY config ./config
+COPY negotiation ./negotiation
+COPY interpretability ./interpretability
+COPY concordia_mini ./concordia_mini
+COPY end_bench ./end_bench
+COPY tests ./tests
+RUN pip install -e . --no-deps
+
+VOLUME ["/data", "/root/.cache/huggingface"]
+WORKDIR /data
+
+ENTRYPOINT ["/workspace/end_bench/docker/entrypoint.sh"]
+CMD ["--help"]

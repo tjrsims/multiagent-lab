@@ -87,6 +87,10 @@ credentials.json
 !/README.md
 !/ARCHITECTURE.md
 !/examples/kaggle/README.md
+!/end_bench/README.md
+!/end_bench/**/*.md
+!/benchmarks/**/*.md
+!/experiments/**/*.md
 
 # Data files (too large for git)
 *.csv
@@ -117,3 +121,7 @@ hackathon_submission.txt
 # Experiment data and figures
 experiment_results/
 figures/
+
+# Local-only planning and implementation notes (never pushed)
+benchmark_planning/
+implementation_plans/

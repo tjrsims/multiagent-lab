@@ -1,0 +1,261 @@
+"""Bedrock prices, cost estimation, and a per-call cost ledger.
+
+Prices are USD per one million tokens (input, output) for on-demand, standard
+(non-batch, non-priority) inference in us-east-1. They are a *table*,
+versioned, and overridable from a JSON file so a run manifest can state exactly
+which prices produced its cost figures. Unknown model ids yield ``None``; the
+ledger records the tokens and leaves the dollar figure empty rather than
+guessing.
+
+Provenance (``PRICE_SOURCES``): Meta, Mistral and Amazon Nova entries were
+read from the AWS Price List API (ServiceCode ``AmazonBedrock``, regionCode
+``us-east-1``, feature "On-demand Inference", inferenceType "Input tokens" /
+"Output tokens") on 2026-10-09; ``end-bench prices --verify`` re-checks them.
+The Price List API and the static pricing page publish no numbers for current
+Anthropic models on Bedrock, so those entries carry Anthropic's first-party
+list prices and are marked ``unverified``; the ledger reports how many dollars
+rest on unverified prices so a cost claim can say so.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+from pathlib import Path
+import threading
+import time
+from typing import Any, Mapping
+
+
+PRICE_TABLE_VERSION = "bedrock-prices/2026-10-09"
+
+_PRICELIST = "verified: AWS Price List API, AmazonBedrock us-east-1 on-demand standard, 2026-10-09"
+_ANTHROPIC = (
+    "unverified: Anthropic first-party list price; Bedrock does not publish current "
+    "Anthropic prices via the Price List API or the static pricing page"
+)
+PRICE_SOURCES: Mapping[str, str] = {
+    "anthropic.claude-sonnet-4-6": _ANTHROPIC,
+    "anthropic.claude-opus-4-8": _ANTHROPIC,
+    "meta.llama4-maverick": _PRICELIST,
+    "meta.llama4-scout": _PRICELIST,
+    "mistral.mistral-large-3": _PRICELIST,
+    "amazon.nova-pro": _PRICELIST,
+    "amazon.nova-lite": _PRICELIST,
+    "amazon.nova-micro": _PRICELIST,
+    "amazon.nova-premier": "unverified: not present in the us-east-1 Price List dump",
+    "scripted": "offline: free by definition",
+}
+
+DEFAULT_PRICES_PER_MTOK: Mapping[str, tuple[float, float]] = {
+    "anthropic.claude-sonnet-4-6": (3.00, 15.00),
+    "anthropic.claude-opus-4-8": (5.00, 25.00),
+    "meta.llama4-maverick": (0.24, 0.97),
+    "meta.llama4-scout": (0.17, 0.66),
+    "mistral.mistral-large-3": (0.50, 1.50),
+    "amazon.nova-pro": (0.80, 3.20),
+    "amazon.nova-lite": (0.06, 0.24),
+    "amazon.nova-micro": (0.035, 0.14),
+    "amazon.nova-premier": (2.50, 12.50),
+    # Offline scripted model: free by definition, so smoke runs are "priced".
+    "scripted": (0.0, 0.0),
+}
+
+
+def load_price_table(path: str | Path) -> dict[str, tuple[float, float]]:
+    """Load ``{model_id_prefix: [input, output]}`` from JSON."""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    table: dict[str, tuple[float, float]] = {}
+    for key, value in payload.items():
+        if (
+            not isinstance(value, (list, tuple)) or len(value) != 2
+            or any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 for v in value)
+        ):
+            raise ValueError(f"price table entry {key!r} must be [input, output] >= 0")
+        table[str(key)] = (float(value[0]), float(value[1]))
+    return table
+
+
+INFERENCE_PROFILE_PREFIXES = ("us.", "eu.", "apac.", "global.", "us-gov.", "jp.", "au.", "ca.")
+
+
+def normalize_model_id(model_id: str) -> str:
+    """Strip our ``bedrock:`` scheme and Bedrock's regional inference-profile prefix.
+
+    On-demand Claude (and some other) models are invoked through inference
+    profiles such as ``us.anthropic.claude-sonnet-4-6-...``; the price is the
+    foundation model's, so pricing matches on the id without that prefix.
+    """
+    normalized = model_id.strip()
+    if normalized.startswith("bedrock:"):
+        normalized = normalized[len("bedrock:"):]
+    for prefix in INFERENCE_PROFILE_PREFIXES:
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+            break
+    return normalized
+
+
+def resolve_price(
+    model_id: str,
+    table: Mapping[str, tuple[float, float]] | None = None,
+) -> tuple[float, float] | None:
+    """Longest-prefix match of a Bedrock model id against the table."""
+    prices = DEFAULT_PRICES_PER_MTOK if table is None else table
+    normalized = normalize_model_id(model_id)
+    candidates = [key for key in prices if normalized.startswith(key)]
+    if not candidates:
+        return None
+    best = max(candidates, key=len)
+    return prices[best]
+
+
+def price_source(
+    model_id: str,
+    table: Mapping[str, tuple[float, float]] | None = None,
+) -> str | None:
+    """Provenance string for the price a model id resolves to (``None`` if unpriced)."""
+    if table is not None:
+        return "custom table" if resolve_price(model_id, table) is not None else None
+    normalized = normalize_model_id(model_id)
+    candidates = [key for key in DEFAULT_PRICES_PER_MTOK if normalized.startswith(key)]
+    if not candidates:
+        return None
+    return PRICE_SOURCES.get(max(candidates, key=len), "unverified: no source recorded")
+
+
+def price_is_verified(model_id: str, table: Mapping[str, tuple[float, float]] | None = None) -> bool:
+    source = price_source(model_id, table)
+    return bool(source) and source.startswith(("verified", "offline"))
+
+
+def estimate_cost(
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    table: Mapping[str, tuple[float, float]] | None = None,
+) -> float | None:
+    """USD for one call, or ``None`` when the model is not in the table."""
+    if input_tokens < 0 or output_tokens < 0:
+        raise ValueError("token counts must be non-negative")
+    price = resolve_price(model_id, table)
+    if price is None:
+        return None
+    return input_tokens / 1_000_000 * price[0] + output_tokens / 1_000_000 * price[1]
+
+
+def estimate_design_cost(
+    model_id: str,
+    *,
+    negotiations: int,
+    calls_per_negotiation: int = 10,
+    input_tokens_per_call: int = 1500,
+    output_tokens_per_call: int = 150,
+    table: Mapping[str, tuple[float, float]] | None = None,
+) -> dict[str, Any]:
+    """Back-of-envelope budget for an experimental design."""
+    if negotiations < 0 or calls_per_negotiation < 0:
+        raise ValueError("counts must be non-negative")
+    calls = negotiations * calls_per_negotiation
+    per_call = estimate_cost(model_id, input_tokens_per_call, output_tokens_per_call, table)
+    return {
+        "model_id": model_id,
+        "negotiations": negotiations,
+        "calls": calls,
+        "input_tokens": calls * input_tokens_per_call,
+        "output_tokens": calls * output_tokens_per_call,
+        "usd_per_negotiation": (
+            None if per_call is None else per_call * calls_per_negotiation
+        ),
+        "usd_total": None if per_call is None else per_call * calls,
+        "price_table_version": PRICE_TABLE_VERSION if table is None else "custom",
+        "price_source": price_source(model_id, table),
+    }
+
+
+@dataclass
+class CostLedger:
+    """Append-only JSONL ledger of model calls with running totals."""
+
+    path: Path | None = None
+    table: Mapping[str, tuple[float, float]] | None = None
+
+    def __post_init__(self) -> None:
+        self._lock = threading.Lock()
+        self.calls = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.usd = 0.0
+        self.unverified_usd = 0.0
+        self.unpriced_calls = 0
+        if self.path is not None:
+            self.path = Path(self.path)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def record(
+        self,
+        *,
+        model_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        latency_ms: float,
+        retries: int,
+        call_id: str | None,
+        stop_reason: str | None,
+    ) -> dict[str, Any]:
+        usd = estimate_cost(model_id, input_tokens, output_tokens, self.table)
+        source = price_source(model_id, self.table)
+        entry = {
+            "price_source": source,
+            "ts": time.time(),
+            "model_id": model_id,
+            "call_id": call_id,
+            "input_tokens": int(input_tokens),
+            "output_tokens": int(output_tokens),
+            "usd": usd,
+            "latency_ms": float(latency_ms),
+            "retries": int(retries),
+            "stop_reason": stop_reason,
+            "price_table_version": PRICE_TABLE_VERSION if self.table is None else "custom",
+        }
+        with self._lock:
+            self.calls += 1
+            self.input_tokens += int(input_tokens)
+            self.output_tokens += int(output_tokens)
+            if usd is None:
+                self.unpriced_calls += 1
+            else:
+                self.usd += usd
+                if not price_is_verified(model_id, self.table):
+                    self.unverified_usd += usd
+            if self.path is not None:
+                with self.path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(entry, sort_keys=True) + "\n")
+        return entry
+
+    def totals(self) -> dict[str, Any]:
+        return {
+            "calls": self.calls,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "usd": self.usd,
+            "unverified_usd": self.unverified_usd,
+            "unpriced_calls": self.unpriced_calls,
+            "price_table_version": PRICE_TABLE_VERSION if self.table is None else "custom",
+        }
+
+
+__all__ = [
+    "DEFAULT_PRICES_PER_MTOK",
+    "INFERENCE_PROFILE_PREFIXES",
+    "PRICE_SOURCES",
+    "PRICE_TABLE_VERSION",
+    "CostLedger",
+    "price_is_verified",
+    "price_source",
+    "estimate_cost",
+    "estimate_design_cost",
+    "load_price_table",
+    "normalize_model_id",
+    "resolve_price",
+]

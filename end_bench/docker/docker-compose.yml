@@ -1,0 +1,42 @@
+# Usage (from the repository root):
+#   docker compose -f end_bench/docker/docker-compose.yml build text
+#   docker compose -f end_bench/docker/docker-compose.yml run --rm text smoke --families 2 --rollouts-per-family 1 --out /data/runs
+#   docker compose -f end_bench/docker/docker-compose.yml run --rm text run-text --model bedrock:meta.llama4-maverick-17b-instruct-v1:0 --out /data/runs
+#   docker compose -f end_bench/docker/docker-compose.yml run --rm whitebox deception run --model google/gemma-2-9b-it --hybrid --device cuda --dtype bfloat16 ...
+# AWS credentials come from the instance profile on EC2, or from ~/.aws mounted read-only locally.
+services:
+  text:
+    build:
+      context: ../..
+      dockerfile: end_bench/docker/Dockerfile.cpu
+    image: end-bench:cpu
+    environment:
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      AWS_PROFILE: ${AWS_PROFILE:-}
+    volumes:
+      - ../../data:/data
+      - ${HOME}/.aws:/root/.aws:ro
+    working_dir: /data
+
+  whitebox:
+    build:
+      context: ../..
+      dockerfile: end_bench/docker/Dockerfile.gpu
+    image: end-bench:gpu
+    environment:
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+    volumes:
+      - ../../data:/data
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+      - ${HOME}/.aws:/root/.aws:ro
+    working_dir: /data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
