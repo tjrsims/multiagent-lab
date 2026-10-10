@@ -280,7 +280,7 @@ def test_factory_builds_all_six_runtime_protocol_implementations() -> None:
         assert isinstance(first, ScenarioActionExtractor)
         assert first is not second
         assert first.scenario_id == scenario_id
-        assert first.parser_version == "1.1.0"
+        assert first.parser_version == "1.2.0"
 
     configs = default_extractor_configs()
     assert tuple(config.scenario_id for config in configs) == SCENARIOS
