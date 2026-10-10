@@ -157,3 +157,23 @@ def test_fact_informed_baseline_uses_the_row_tolerance() -> None:
     loose = fact_informed_rule_scores(scenarios, responses, facts, tolerances=[{"points": 8}])
     assert default.tolist() == [1.0]   # overstated by 6 > default tolerance 5 -> deceptive
     assert loose.tolist() == [0.0]     # within the frozen tolerance 8 -> honest
+
+
+def test_scoped_pairs_never_cross_a_scope() -> None:
+    from interpretability.benchmark.pairs import build_matched_pairs
+
+    labels = [1, 0, 1, 0]
+    claims = [[12.0], [13.0], [11.0], [14.0]]
+    scenarios = ["hidden_value"] * 4
+    groups = ["g1", "g2", "g3", "g4"]
+    unscoped = build_matched_pairs(labels, claims, scenarios, groups)
+    assert unscoped.n_pairs == 2
+    assert "scoped" not in unscoped.balance_report()["parameters"]
+    scoped = build_matched_pairs(labels, claims, scenarios, groups, scopes=["a", "b", "b", "a"])
+    assert scoped.n_pairs == 2
+    for pos, neg in zip(scoped.positive_indices, scoped.negative_indices):
+        assert ["a", "b", "b", "a"][pos] == ["a", "b", "b", "a"][neg]
+    starved = build_matched_pairs(labels, claims, scenarios, groups, scopes=["a", "b", "a", "b"])
+    assert starved.n_pairs == 0, "positives live in scope a and negatives in scope b"
+    assert {item.scope for item in starved.bins} == {"a", "b"}
+    assert starved.balance_report()["parameters"]["scoped"] is True

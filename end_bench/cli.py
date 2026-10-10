@@ -185,6 +185,37 @@ def build(dataset_path, out_dir, label_source, rows, bin_width, split_seed, n_bo
         click.echo(f"  wrote {name}: {path}")
 
 
+@cli.command('pool')
+@click.option('--dataset', 'dataset_paths', multiple=True, required=True,
+              type=click.Path(exists=True, dir_okay=False), help='END-Bench text dataset (.json). Repeatable.')
+@click.option('--out', 'out_path', required=True, type=click.Path(dir_okay=False),
+              help='Where to write the pooled text dataset (.json).')
+@click.option('--allow-mixed-registry', is_flag=True, default=False,
+              help='Pool datasets whose schema registry checksums differ (records it in the manifest).')
+def pool(dataset_paths, out_path, allow_mixed_registry):
+    """Pool several text datasets into one derived dataset for cross-run audits.
+
+    Row and record ids are prefixed with the source run id so nothing collides;
+    trial families stay shared because two runs of one family share the same
+    private facts. The result feeds `adjudicate export` and `judge`; it is not
+    a run and is never a leaderboard entry.
+    """
+    from end_bench.data.pooled import PooledDatasetError, pool_text_datasets
+    from end_bench.data.text_dataset import load_text_dataset, save_text_dataset
+
+    try:
+        pooled = pool_text_datasets(
+            [load_text_dataset(path) for path in dataset_paths], allow_mixed_registry=allow_mixed_registry,
+        )
+    except PooledDatasetError as error:
+        raise click.UsageError(str(error)) from error
+    save_text_dataset(out_path, pooled)
+    info = pooled["config"]["run_manifest"]["pooled"]
+    click.echo(f"pooled {len(info['sources'])} datasets -> {pooled['config']['n_rows']} rows: {out_path}")
+    for source in info["sources"]:
+        click.echo(f"  {source['run_id']:45s} {source['model_name']:50s} rows={source['n_rows']}")
+
+
 @cli.command('judge')
 @click.option('--dataset', 'dataset_path', required=True, type=click.Path(exists=True, dir_okay=False),
               help='END-Bench text dataset or activation dataset manifest.')
@@ -198,7 +229,7 @@ def build(dataset_path, out_dir, label_source, rows, bin_width, split_seed, n_bo
 def judge(dataset_path, out_dir, judges, access, region, n_bootstrap, bin_width):
     """Score LLM judges against computed truth, transcript-only and fact-informed."""
     from end_bench.judges import JudgeAccess, JudgeCache, run_judge, score_judges
-    from interpretability.benchmark.pairs import build_matched_pairs
+    from interpretability.benchmark.pairs import build_matched_pairs, pair_scopes_for_views, twin_ids_for_views
 
     dataset, views = _load_views(dataset_path)
     target = Path(out_dir); target.mkdir(parents=True, exist_ok=True)
@@ -210,7 +241,11 @@ def judge(dataset_path, out_dir, judges, access, region, n_bootstrap, bin_width)
         for mode in accesses:
             runs.append(run_judge(views, model, access=mode, judge_name=spec, cache=cache))
             click.echo(f"  judged {spec} [{mode.value}]: undetermined={runs[-1].n_undetermined}/{views.n} cache_hits={runs[-1].cache_hits}")
-    pairs = build_matched_pairs(views.labels, views.claim_values, views.scenarios, views.group_ids, bin_width=bin_width)
+    pairs = build_matched_pairs(
+        views.labels, views.claim_values, views.scenarios, views.group_ids, bin_width=bin_width,
+        twin_ids=twin_ids_for_views(views), scopes=pair_scopes_for_views(views),
+    )
+    click.echo(f"  matched pairs: {pairs.n_pairs} (twins first; pairs never cross a source run)")
     card = score_judges(views, runs, pairs=pairs, n_bootstrap=n_bootstrap)
     (target / "judges.json").write_text(json.dumps(card.to_dict(), indent=2, sort_keys=True))
     for score in card.detector_scores:

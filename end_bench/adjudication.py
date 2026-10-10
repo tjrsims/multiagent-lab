@@ -138,6 +138,7 @@ def export_adjudication_batch(
             "facts": dict(views.private_facts[index]),
             "rule_label": "true" if views.labels[index] == 1 else "false",
             "group_id": str(views.group_ids[index]),
+            "source_run_id": views.sources[index] if views.sources else None,
             "is_gold": False,
             "gold_label": None,
         })
@@ -159,6 +160,7 @@ def export_adjudication_batch(
                 "facts": dict(views.private_facts[index]),
                 "rule_label": synthetic["gold_label"],
                 "group_id": str(views.group_ids[index]),
+                "source_run_id": views.sources[index] if views.sources else None,
                 "is_gold": True,
                 "gold_label": synthetic["gold_label"],
             })
@@ -186,6 +188,7 @@ def export_adjudication_batch(
         item["item_id"]: {
             "row_index": item["row_index"], "scenario": item["scenario"], "rule_label": item["rule_label"],
             "is_gold": item["is_gold"], "gold_label": item["gold_label"], "group_id": item["group_id"],
+            "source_run_id": item["source_run_id"],
         }
         for item in items
     }

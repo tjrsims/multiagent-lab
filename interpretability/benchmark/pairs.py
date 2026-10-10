@@ -51,6 +51,8 @@ class BinBalance:
     negatives_available: int
     pairs_formed: int
     twin_pairs: int
+    # Pairing scope (the source run in a pooled dataset); None for one run.
+    scope: str | None = None
 
     @property
     def dropped(self) -> int:
@@ -111,6 +113,7 @@ class MatchedPairs:
                     "pairs_formed": item.pairs_formed,
                     "twin_pairs": item.twin_pairs,
                     "dropped": item.dropped,
+                    **({"scope": item.scope} if item.scope is not None else {}),
                 }
                 for item in self.bins
             ],
@@ -137,26 +140,31 @@ def build_matched_pairs(
     bin_width: float = 5.0,
     seed: int = 0,
     twin_ids: Sequence[str | None] | None = None,
+    scopes: Sequence[str | None] | None = None,
 ) -> MatchedPairs:
     """Pair TRUE and FALSE claim-bearing rows within claim bins.
 
     Rows without a claim value are skipped (they are not claim-bearing). Two
     rows from the same ``group_id`` are never paired, so a pair always spans
     distinct leakage groups. When ``twin_ids`` is given, rows sharing a twin id
-    with opposite labels are paired first.
+    with opposite labels are paired first. When ``scopes`` is given (the source
+    run of each row in a pooled dataset), a pair never crosses a scope: a
+    model's turn is only ever matched against another turn of the same model.
     """
     n = len(labels)
     if not (len(claim_values) == len(scenarios) == len(group_ids) == n):
         raise MatchedPairError("inputs must be index-aligned")
     if twin_ids is not None and len(twin_ids) != n:
         raise MatchedPairError("twin_ids must align with rows")
+    if scopes is not None and len(scopes) != n:
+        raise MatchedPairError("scopes must align with rows")
     if not (isinstance(bin_width, (int, float)) and math.isfinite(bin_width)
             and bin_width > 0):
         raise MatchedPairError("bin_width must be a positive finite number")
     if type(seed) is not int:
         raise MatchedPairError("seed must be an integer")
 
-    cells: dict[tuple[str, int], dict[str, list[int]]] = {}
+    cells: dict[tuple[str, int, str | None], dict[str, list[int]]] = {}
     for index in range(n):
         label = int(labels[index])
         if label not in (0, 1):
@@ -165,8 +173,11 @@ def build_matched_pairs(
         if claim is None:
             continue
         bin_index = int(math.floor(claim / bin_width))
+        scope = None
+        if scopes is not None:
+            scope = str(scopes[index]) if scopes[index] is not None else ""
         cell = cells.setdefault(
-            (str(scenarios[index]), bin_index), {"pos": [], "neg": []}
+            (str(scenarios[index]), bin_index, scope), {"pos": [], "neg": []}
         )
         cell["pos" if label == 1 else "neg"].append(index)
 
@@ -175,8 +186,8 @@ def build_matched_pairs(
     positives: list[int] = []
     negatives: list[int] = []
     balances: list[BinBalance] = []
-    for (scenario, bin_index) in sorted(cells):
-        cell = cells[(scenario, bin_index)]
+    for (scenario, bin_index, scope) in sorted(cells, key=lambda key: (key[0], key[1], key[2] or "")):
+        cell = cells[(scenario, bin_index, scope)]
         pos = sorted(cell["pos"], key=lambda i: (str(group_ids[i]), i))
         neg = sorted(cell["neg"], key=lambda i: (str(group_ids[i]), i))
         formed = 0
@@ -241,8 +252,12 @@ def build_matched_pairs(
             negatives_available=len(neg),
             pairs_formed=formed,
             twin_pairs=twin_formed,
+            scope=scope,
         ))
 
+    parameters: dict[str, Any] = {"twin_ids_supplied": twin_ids is not None}
+    if scopes is not None:
+        parameters["scoped"] = True
     return MatchedPairs(
         pair_ids=tuple(pair_ids),
         positive_indices=np.asarray(positives, dtype=int),
@@ -250,8 +265,36 @@ def build_matched_pairs(
         bins=tuple(balances),
         bin_width=float(bin_width),
         seed=seed,
-        parameters={"twin_ids_supplied": twin_ids is not None},
+        parameters=parameters,
     )
+
+
+def twin_ids_for_views(views: Any) -> list[str | None]:
+    """One twin id per view row: leakage group plus anchor, plus the source run when pooled.
+
+    Twins are the two trials of one family that share a claim anchor and carry
+    opposite truth. In a pooled dataset the same family appears once per source
+    run, so the source is part of the id and a twin never crosses models.
+    """
+    sources = tuple(views.sources) if getattr(views, "sources", None) else (None,) * views.n
+    twins: list[str | None] = []
+    for group, role, anchor, source in zip(views.group_ids, views.pair_roles, views.pair_anchors, sources):
+        if role is None:
+            twins.append(None)
+            continue
+        twin = f"{group}|{anchor}"
+        if source is not None:
+            twin = f"{twin}|{source}"
+        twins.append(twin)
+    return twins
+
+
+def pair_scopes_for_views(views: Any) -> tuple[str, ...] | None:
+    """Pairing scopes for ``build_matched_pairs``: the source run per row, or None when not pooled."""
+    sources = tuple(getattr(views, "sources", None) or ())
+    if not sources or all(item is None for item in sources):
+        return None
+    return tuple(str(item) if item is not None else "" for item in sources)
 
 
 __all__ = [
@@ -260,4 +303,6 @@ __all__ = [
     "MatchedPairError",
     "MatchedPairs",
     "build_matched_pairs",
+    "pair_scopes_for_views",
+    "twin_ids_for_views",
 ]

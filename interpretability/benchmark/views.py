@@ -108,9 +108,13 @@ class ViewsReport:
     dyad_aware_groups: bool
     split_manifest_id: str | None
     version: str = VIEWS_VERSION
+    # Distinct ``source_run_id`` values when the dataset is a pooled one
+    # (``end_bench.data.pooled``); empty for a single-run dataset, and then
+    # left out of ``to_dict`` so existing reports keep their exact shape.
+    source_runs: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "version": self.version,
             "label_source": self.label_source,
             "rows_policy": self.rows_policy,
@@ -141,6 +145,9 @@ class ViewsReport:
             "dyad_aware_groups": self.dyad_aware_groups,
             "split_manifest_id": self.split_manifest_id,
         }
+        if self.source_runs:
+            out["source_runs"] = list(self.source_runs)
+        return out
 
 
 @dataclass(frozen=True)
@@ -174,6 +181,10 @@ class BenchmarkViews:
     partitions: tuple[str | None, ...] = ()
     dialogue_history: tuple[tuple[str, ...], ...] = ()
     generation_record_ids: tuple[str | None, ...] = ()
+    # The run each row came from (``source_run_id``) in a pooled dataset.
+    # Twins and matched pairs never cross a source; leakage groups still may,
+    # because two runs of one family share the same private facts.
+    sources: tuple[str | None, ...] = ()
     report: ViewsReport | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
@@ -188,7 +199,7 @@ class BenchmarkViews:
             self.tolerances, self.rule_versions, self.label_sources, self.incentive_conditions,
             self.counterpart_types, self.trial_ids, self.runtime_paths,
             self.pair_roles, self.pair_anchors, self.partitions,
-            self.dialogue_history, self.generation_record_ids,
+            self.dialogue_history, self.generation_record_ids, self.sources,
         )
         if any(item and len(item) != n for item in optional):
             raise ViewsError("optional view fields are not index-aligned")
@@ -531,6 +542,12 @@ def build_views(
 
     private_facts = tuple(_actor_facts(row, scenario) for row, scenario in zip(kept_rows, scenarios))
     responses = tuple(str(row.get("full_response", "")) for row in kept_rows)
+    sources: tuple[str | None, ...] = tuple(
+        (str(row["source_run_id"]) if row.get("source_run_id") is not None else None)
+        for row in kept_rows
+    )
+    if all(item is None for item in sources):
+        sources = ()  # a single-run dataset carries no sources at all
     kept_activations = {layer: matrix[keep] for layer, matrix in stacked.items()}
 
     no_claim_rate = {}
@@ -558,6 +575,7 @@ def build_views(
         n_groups=len(set(group_ids_list)),
         dyad_aware_groups=dyad_aware,
         split_manifest_id=manifest_id,
+        source_runs=tuple(sorted({item for item in sources if item is not None})),
     )
     return BenchmarkViews(
         labels=np.asarray(resolved_labels, dtype=int),
@@ -593,6 +611,7 @@ def build_views(
             (str(row["generation_record_id"]) if row.get("generation_record_id") is not None else None)
             for row in kept_rows
         ),
+        sources=sources,
         report=report,
     )
 

@@ -36,7 +36,12 @@ from interpretability.benchmark.baselines import (
     stated_claim_threshold,
 )
 from interpretability.benchmark.manifest import BenchmarkManifest, dataset_hash_for
-from interpretability.benchmark.pairs import MatchedPairs, build_matched_pairs
+from interpretability.benchmark.pairs import (
+    MatchedPairs,
+    build_matched_pairs,
+    pair_scopes_for_views,
+    twin_ids_for_views,
+)
 from interpretability.benchmark.scoring import (
     BehavioralCell,
     DetectorScore,
@@ -228,13 +233,10 @@ def build_benchmark(
         # so in the scorecard rather than silently scoring an empty subset.
         scoring_partition = None
         train_probe = False
-    twin_ids = [
-        f"{group}|{anchor}" if role is not None else None
-        for group, role, anchor in zip(views.group_ids, views.pair_roles, views.pair_anchors)
-    ]
     pairs = build_matched_pairs(
         views.labels, views.claim_values, views.scenarios, views.group_ids,
-        bin_width=bin_width, seed=pair_seed, twin_ids=twin_ids,
+        bin_width=bin_width, seed=pair_seed, twin_ids=twin_ids_for_views(views),
+        scopes=pair_scopes_for_views(views),
     )
     pair_mask = _pair_mask(views, pairs)
 
