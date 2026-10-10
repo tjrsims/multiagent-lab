@@ -98,7 +98,7 @@ class BedrockTextModel(language_model.LanguageModel):
         region: str = "us-east-1",
         max_tokens: int = 128,
         temperature: float = 0.7,
-        top_p: float = 0.9,
+        top_p: float | None = 0.9,
         system_prompt: str | None = None,
         client: Any | None = None,
         cost_ledger: CostLedger | None = None,
@@ -115,7 +115,7 @@ class BedrockTextModel(language_model.LanguageModel):
             raise ValueError("max_tokens must be a positive integer")
         if not 0.0 <= float(temperature) <= 1.0:
             raise ValueError("Bedrock temperature must be within [0, 1]")
-        if not 0.0 < float(top_p) <= 1.0:
+        if top_p is not None and not 0.0 < float(top_p) <= 1.0:
             raise ValueError("top_p must be within (0, 1]")
         if type(max_retries) is not int or max_retries < 0:
             raise ValueError("max_retries must be a non-negative integer")
@@ -123,7 +123,13 @@ class BedrockTextModel(language_model.LanguageModel):
         self.region = region
         self.default_max_tokens = max_tokens
         self.default_temperature = float(temperature)
-        self.default_top_p = float(top_p)
+        # Anthropic models on Bedrock reject a request that sets both
+        # temperature and top_p ("cannot both be specified for this model"),
+        # so they get temperature only unless a caller insists on top_p.
+        self.default_top_p = (
+            None if top_p == 0.9 and "anthropic." in self.model_id
+            else (None if top_p is None else float(top_p))
+        )
         self.last_error: str | None = None
         self.failed_calls = 0
         self.system_prompt = system_prompt
@@ -171,15 +177,17 @@ class BedrockTextModel(language_model.LanguageModel):
             self._client = _default_client(self.region, read_timeout=self._read_timeout)
         return self._client
 
-    def _converse(self, prompt: str, *, max_tokens: int, temperature: float, top_p: float) -> tuple[dict[str, Any], int]:
+    def _converse(self, prompt: str, *, max_tokens: int, temperature: float, top_p: float | None) -> tuple[dict[str, Any], int]:
+        inference: dict[str, Any] = {
+            "maxTokens": int(max_tokens),
+            "temperature": float(temperature),
+        }
+        if top_p is not None:
+            inference["topP"] = float(top_p)
         request: dict[str, Any] = {
             "modelId": self.model_id,
             "messages": [{"role": "user", "content": [{"text": prompt}]}],
-            "inferenceConfig": {
-                "maxTokens": int(max_tokens),
-                "temperature": float(temperature),
-                "topP": float(top_p),
-            },
+            "inferenceConfig": inference,
         }
         if self.system_prompt:
             request["system"] = [{"text": self.system_prompt}]
@@ -235,7 +243,7 @@ class BedrockTextModel(language_model.LanguageModel):
             float(temperature) if temperature is not None else self.default_temperature
         )
         effective_temperature = min(max(effective_temperature, 0.0), 1.0)
-        effective_top_p = float(top_p) if top_p is not None else self.default_top_p
+        effective_top_p = float(top_p) if top_p is not None else self.default_top_p  # None omits topP
         started = time.monotonic()
         response, retries = self._converse(
             prompt,
@@ -270,7 +278,10 @@ class BedrockTextModel(language_model.LanguageModel):
             requested_max_tokens=requested_max_tokens,
             effective_max_tokens=effective_max_tokens,
             temperature=effective_temperature if temperature is None else float(temperature),
-            top_p=effective_top_p,
+            # When topP is not sent (Anthropic), Bedrock's default of no
+            # nucleus truncation applies: requested 1.0, effective recorded as
+            # None (not sent).
+            top_p=effective_top_p if effective_top_p is not None else 1.0,
             top_k=int(top_k) if top_k is not None else 0,
             seed=seed,
             effective_temperature=effective_temperature,

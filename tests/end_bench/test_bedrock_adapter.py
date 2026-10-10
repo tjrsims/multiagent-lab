@@ -98,7 +98,8 @@ def test_sample_text_publishes_faithful_text_only_record(tmp_path) -> None:
     assert record.effective_sampling.seed is None, "Bedrock exposes no seed"
     request = client.requests[0]
     assert request["modelId"] == "anthropic.claude-sonnet-4-6-20260301-v1:0"
-    assert request["inferenceConfig"] == {"maxTokens": 64, "temperature": 0.5, "topP": 0.9}
+    # Anthropic ids get temperature only; Bedrock rejects temperature plus topP for them.
+    assert request["inferenceConfig"] == {"maxTokens": 64, "temperature": 0.5}
     assert request["messages"][0]["content"][0]["text"] == "Negotiate."
     provenance = model.get_last_sampling_config()
     assert provenance["provider"] == "bedrock" and provenance["usage"] == {"input_tokens": 1200, "output_tokens": 40}
@@ -192,3 +193,29 @@ def test_pricing_prefix_match_estimates_and_unknown_models(tmp_path) -> None:
     bad.write_text(json.dumps({"x": [1.0]}))
     with pytest.raises(ValueError):
         load_price_table(bad)
+
+
+
+def test_anthropic_models_get_temperature_only_and_others_keep_top_p() -> None:
+    """Bedrock rejects Anthropic requests that set both temperature and top_p."""
+    from end_bench.models.bedrock import BedrockTextModel
+
+    class Capture:
+        def __init__(self):
+            self.requests = []
+
+        def converse(self, **request):
+            self.requests.append(request)
+            return {"output": {"message": {"content": [{"text": "ready"}]}}, "stopReason": "end_turn",
+                    "usage": {"inputTokens": 3, "outputTokens": 1}}
+
+    claude = Capture()
+    BedrockTextModel("global.anthropic.claude-sonnet-4-6", client=claude, temperature=0.5).sample_text("hi")
+    assert "topP" not in claude.requests[0]["inferenceConfig"]
+    assert claude.requests[0]["inferenceConfig"]["temperature"] == 0.5
+    nova = Capture()
+    BedrockTextModel("amazon.nova-pro-v1:0", client=nova, temperature=0.5).sample_text("hi")
+    assert nova.requests[0]["inferenceConfig"]["topP"] == 0.9
+    explicit = Capture()
+    BedrockTextModel("global.anthropic.claude-sonnet-4-6", client=explicit, top_p=0.8).sample_text("hi")
+    assert explicit.requests[0]["inferenceConfig"]["topP"] == 0.8  # a caller who insists gets it

@@ -36,6 +36,10 @@ _ANTHROPIC = (
 )
 PRICE_SOURCES: Mapping[str, str] = {
     "anthropic.claude-sonnet-4-6": _ANTHROPIC,
+    "anthropic.claude-sonnet-4-5": _ANTHROPIC,
+    "anthropic.claude-haiku-4-5": _ANTHROPIC,
+    "anthropic.claude-opus-4-5": _ANTHROPIC,
+    "anthropic.claude-opus-4-6": _ANTHROPIC,
     "anthropic.claude-opus-4-8": _ANTHROPIC,
     "meta.llama4-maverick": _PRICELIST,
     "meta.llama4-scout": _PRICELIST,
@@ -49,6 +53,10 @@ PRICE_SOURCES: Mapping[str, str] = {
 
 DEFAULT_PRICES_PER_MTOK: Mapping[str, tuple[float, float]] = {
     "anthropic.claude-sonnet-4-6": (3.00, 15.00),
+    "anthropic.claude-sonnet-4-5": (3.00, 15.00),
+    "anthropic.claude-haiku-4-5": (1.00, 5.00),
+    "anthropic.claude-opus-4-5": (5.00, 25.00),
+    "anthropic.claude-opus-4-6": (5.00, 25.00),
     "anthropic.claude-opus-4-8": (5.00, 25.00),
     "meta.llama4-maverick": (0.24, 0.97),
     "meta.llama4-scout": (0.17, 0.66),
