@@ -15,6 +15,7 @@ containers.
 | `data/text_dataset.py` | `end_bench_text_dataset/1`: rows, labels, canonical records, content hash — the text-track artifact `benchmark.views` consumes |
 | `run.py` | `RunSpec` + `run_text_track`: model → fail-closed execution plan → runner (injected model, text-only track) → text dataset + run manifest |
 | `cli.py` | `end-bench run-text, smoke, build, pool, judge, adjudicate export/import, outcomes, report, estimate, prices, bedrock-models, module run/pilot/leaderboard, info` |
+| `data/relabel.py` | `end-bench relabel`: re-read numeric claim turns under the current extractor and rule offline, with the original label records kept and every transition counted |
 | `data/pooled.py` | `end-bench pool`: merge several runs' text datasets into one derived audit dataset (ids prefixed by run id, families shared, pairs never cross a run) for the pooled human batch and judge audit |
 | `judges.py` | Judge testbed: transcript-only vs fact-informed judges scored against computed truth (AUROC, FPR/FNR, access gap); `oracle` judge for offline smoke |
 | `adjudication.py` | Blinded, stratified rater batches with hidden gold items; Fleiss' kappa, gold accuracy, rule-vs-human agreement; `human_label` application so builds can run with `--label-source human` |
@@ -49,6 +50,7 @@ docker compose -f end_bench/docker/docker-compose.yml run --rm text smoke --fami
 After a run (all offline):
 
 ```bash
+end-bench relabel    --run-dir runs/<a> --run-dir runs/<b> --out relabeled/      # re-read stored turns under the current extractor; original label records stay
 end-bench pool       --dataset runs/<a>/text_dataset.json --dataset runs/<b>/text_dataset.json --out pooled/text_dataset.json
 end-bench judge      --dataset runs/<id>/text_dataset.json --out builds/<id> --judge oracle          # or --judge bedrock:<model_id>; a pooled dataset works too
 end-bench judge      --dataset pooled/text_dataset.json --out judges/paired --judge bedrock:<id> --subset paired --workers 8   # twins only, 8 parallel calls; --subset batch:<dir> judges an exported human batch

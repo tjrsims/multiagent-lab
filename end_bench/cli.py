@@ -185,6 +185,60 @@ def build(dataset_path, out_dir, label_source, rows, bin_width, split_seed, n_bo
         click.echo(f"  wrote {name}: {path}")
 
 
+@cli.command('relabel')
+@click.option('--run-dir', 'run_dirs', multiple=True, type=click.Path(exists=True, file_okay=False),
+              help='Finished run directory (text_dataset.json, run_manifest.json, cost_ledger.jsonl). Repeatable.')
+@click.option('--dataset', 'dataset_path', default=None, type=click.Path(exists=True, dir_okay=False),
+              help='A single text dataset instead of run directories.')
+@click.option('--out', 'out_path', required=True, type=click.Path(),
+              help='Output root for --run-dir (one sub-directory per run) or the output file for --dataset.')
+def relabel(run_dirs, dataset_path, out_path):
+    """Re-read numeric claim turns under the current extractor and rule, offline.
+
+    Labels are computed at run time and stored. After an extractor fix the
+    stored text and facts are read again; the original label records stay as
+    evidence, changed rows record the extractor they came from, and the
+    manifest says the dataset is relabeled.
+    """
+    import shutil
+
+    from end_bench.data.relabel import RelabelError, relabel_text_dataset
+    from end_bench.data.text_dataset import load_text_dataset, save_text_dataset
+
+    if bool(run_dirs) == bool(dataset_path):
+        raise click.UsageError("pass either --run-dir (repeatable) or --dataset")
+
+    def _one(source_file, target_file):
+        relabeled, report = relabel_text_dataset(load_text_dataset(source_file))
+        save_text_dataset(target_file, relabeled)
+        click.echo(f"  {Path(source_file).parent.name}: {report['rows_changed']}/{report['rows_considered']} rows changed "
+                   f"{report['transitions']} (extractor {report['from_extractors']} -> {report['to_extractor']})")
+        return report
+
+    try:
+        if dataset_path:
+            _one(dataset_path, out_path)
+            return
+        root = Path(out_path); root.mkdir(parents=True, exist_ok=True)
+        for run_dir in run_dirs:
+            run = Path(run_dir)
+            if not (run / "text_dataset.json").exists():
+                click.echo(f"skipped {run}: no text_dataset.json", err=True)
+                continue
+            target = root / run.name
+            target.mkdir(parents=True, exist_ok=True)
+            report = _one(run / "text_dataset.json", target / "text_dataset.json")
+            for name in ("cost_ledger.jsonl", "results.json"):
+                if (run / name).exists():
+                    shutil.copyfile(run / name, target / name)
+            manifest = json.loads((run / "run_manifest.json").read_text()) if (run / "run_manifest.json").exists() else {}
+            manifest["relabel"] = report
+            manifest["relabeled_from_run_dir"] = str(run)
+            (target / "run_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True, default=str))
+    except RelabelError as error:
+        raise click.UsageError(str(error)) from error
+
+
 @cli.command('pool')
 @click.option('--dataset', 'dataset_paths', multiple=True, required=True,
               type=click.Path(exists=True, dir_okay=False), help='END-Bench text dataset (.json). Repeatable.')
