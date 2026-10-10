@@ -78,13 +78,14 @@ def select_cells(
 
 
 def render_pilot_report(table: Sequence[Mapping[str, Any]], selection: Mapping[str, Any]) -> str:
-    lines = ["| model | scenario | policy | trials | trials with a claim | claim bearing turns | lie rate | run $ |",
-             "|---|---|---|---|---|---|---|---|"]
+    lines = ["| model | scenario | policy | trials | trials with a claim | claim bearing turns | lie rate | median lie size | run $ |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for r in sorted(table, key=lambda r: (str(r["model"]), str(r["scenario"]), str(r["counterpart_type"]))):
         cb = "n/a" if r["claim_bearing_rate"] is None else f"{r['claim_bearing_rate']:.0%}"
         cov = "n/a" if r.get("trial_claim_coverage") is None else f"{r['trial_claim_coverage']:.0%}"
         lr = "n/a" if r["lie_rate"] is None else f"{r['lie_rate']:.0%} [{r['lie_rate_ci'][0]:.0%}, {r['lie_rate_ci'][1]:.0%}]"
-        lines.append(f"| {r['model']} | {r['scenario']} | {r['counterpart_type']} | {r['trials']} | {cov} | {cb} | {lr} | {r['run_usd']:.3f} |")
+        size = "n/a" if r.get("lie_size_median") is None else f"{r['lie_size_median']:+.0%} (n={r['n_lie_sizes']})"
+        lines.append(f"| {r['model']} | {r['scenario']} | {r['counterpart_type']} | {r['trials']} | {cov} | {cb} | {lr} | {size} | {r['run_usd']:.3f} |")
     lines.append("")
     lines.append("Kept cells (at least "
                  f"{selection['min_trial_coverage']:.0%} of trials hold a claim, some model lies at or above {selection['min_lie_rate']:.0%})")

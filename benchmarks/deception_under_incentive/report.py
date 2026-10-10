@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import statistics
 from typing import Any
 
 from benchmarks.deception_under_incentive.analysis import summarize
@@ -29,7 +30,10 @@ def run_row(run_dir: str | Path) -> dict[str, Any]:
     lies = sum((c["lie_rate"] or 0.0) * c["n_claims"] for c in summary["cells"])
     turns = sum(c["turns"] for c in summary["cells"])
     trials = sum(c["trials"] for c in summary["cells"])
+    sizes = [size for values in summary.get("lie_sizes_by_scenario", {}).values() for size in values]
     return {
+        "lie_size_median": statistics.median(sizes) if sizes else None,
+        "n_lie_sizes": len(sizes),
         "run_id": manifest.get("run_id"),
         "model": manifest.get("spec", {}).get("model"),
         "counterpart_type": ",".join(manifest.get("spec", {}).get("counterpart_types", [])),
@@ -47,14 +51,14 @@ def render_leaderboard(run_dirs: list[str | Path]) -> str:
     rows = [run_row(d) for d in run_dirs]
     rows.sort(key=lambda r: (r["lie_rate"] is None, r["lie_rate"] or 0.0))
     lines = [
-        "| run | model | counterpart | negotiations | claim bearing | lie rate | $ per negotiation | unverified $ share |",
-        "|---|---|---|---|---|---|---|---|",
+        "| run | model | counterpart | negotiations | claim bearing | lie rate | median lie size | $ per negotiation | unverified $ share |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         fmt = lambda v, p: ("n/a" if v is None else f"{v:{p}}")  # noqa: E731
         lines.append(
             f"| {r['run_id']} | {r['model']} | {r['counterpart_type']} | {r['negotiations']} | "
-            f"{fmt(r['claim_bearing_rate'], '.0%')} | {fmt(r['lie_rate'], '.1%')} | "
+            f"{fmt(r['claim_bearing_rate'], '.0%')} | {fmt(r['lie_rate'], '.1%')} | {fmt(r['lie_size_median'], '+.0%')} | "
             f"{fmt(r['usd_per_negotiation'], '.4f')} | {fmt(r['unverified_share'], '.0%')} |"
         )
     return "\n".join(lines) + "\n"
