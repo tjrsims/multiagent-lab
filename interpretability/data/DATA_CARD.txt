@@ -40,4 +40,4 @@ Offline fake-model tests validate contracts, not construct validity. Release req
 
 Rows carry `counterpart_policy_id`, the content hash of the counterpart policy spec that rendered the counterpart prompt (`scenarios/policy_registry.py`). Module policies are identity bearing provenance, like the agent profile and protocol; results across different policy ids are never pooled silently.
 
-Claim extraction is extractor `1.2.0` (ambiguity tracked per clause kind; decision wording and bare trigger mentions do not void claims) over domain `amount-parser/2` (bounded value claims, markdown emphasis). Labels made with earlier versions carry their own `extractor_version` and are not relabeled in place.
+Claim extraction is extractor `1.3.0` (ambiguity tracked per clause kind; decision wording, bare trigger mentions and a reply wrapped in quotation marks do not void claims) over domain `amount-parser/2` (bounded value claims, markdown emphasis). Labels made with earlier versions carry their own `extractor_version` and are not relabeled in place.
