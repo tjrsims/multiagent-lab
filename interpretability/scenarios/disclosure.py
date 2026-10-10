@@ -59,11 +59,13 @@ _NEGATION_WINDOW = 30  # characters of normalized text before a term
 DEFECT_TERMS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {
     "The transmission occasionally slips when shifting from 2nd to 3rd gear": (
         frozenset({"transmission", "gearbox", "gear", "shift"}),
-        frozenset({"slip", "issue", "problem", "trouble", "hesitat", "rough", "jerk", "fault"}),
+        frozenset({"slip", "issue", "problem", "trouble", "hesitat", "rough", "jerk", "fault",
+                   "finick", "stick", "shudder", "clunk", "delay", "lag", "grind", "quirk"}),
     ),
     "The AC compressor is failing and will need replacement within 6 months": (
         frozenset({"ac", "a c", "air conditioning", "air conditioner", "compressor", "a/c"}),
-        frozenset({"fail", "replac", "weak", "issue", "problem", "going out", "dying", "broken", "fault"}),
+        frozenset({"fail", "replac", "weak", "issue", "problem", "going out", "dying", "broken", "fault",
+                   "wear", "worn", "struggl", "on its way out", "not long"}),
     ),
     "There's a slow oil leak from the valve cover gasket": (
         frozenset({"oil", "valve cover", "gasket"}),

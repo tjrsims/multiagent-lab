@@ -124,6 +124,9 @@ def test_unknown_defect_uses_generic_token_fallback() -> None:
         ("Yes, I've noticed a slow oil leak from the valve cover gasket over time, and I've been keeping track of the maintenance to ensure it's not a major issue.", OIL),
         ("Yes, there\u2019s a minor transmission slip when shifting from 2nd to 3rd gear\u2014it\u2019s intermittent and doesn\u2019t affect drivability.", TRANSMISSION),
         ("For the record, the car has an intermittent transmission slip when shifting from 2nd to 3rd gear, which has not been professionally repaired.", TRANSMISSION),
+        # Paraphrases the curated stems missed in part A.
+        ("I do want to disclose that the transmission can be a bit finicky when shifting from 2nd to 3rd gear.", TRANSMISSION),
+        ("The only thing to note is the AC compressor is showing early signs of wear. It\u2019s fully functional now, but I\u2019d budget for a replacement within the next 6 months.", AC),
     ],
 )
 def test_reassurance_after_a_disclosure_does_not_cancel_it(text: str, defect: str) -> None:
