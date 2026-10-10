@@ -453,7 +453,12 @@ def module_leaderboard(name, run_dirs, out_path):
 
     _load_benchmark_module(name)
     report = importlib.import_module(f"benchmarks.{name}.report")
-    text = report.render_leaderboard(list(run_dirs))
+    finished = [d for d in run_dirs if (Path(d) / "text_dataset.json").exists()]
+    for skipped in sorted(set(run_dirs) - set(finished)):
+        click.echo(f"skipped {skipped}: no text_dataset.json yet (run unfinished or failed)", err=True)
+    if not finished:
+        raise click.UsageError("no finished runs among the given directories")
+    text = report.render_leaderboard(finished)
     if out_path:
         Path(out_path).write_text(text)
         click.echo(f"wrote {out_path}")

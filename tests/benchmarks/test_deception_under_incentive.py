@@ -210,3 +210,21 @@ def test_presets_scale_as_documented() -> None:
     assert lite.families == 30 and len(lite.conditions) == 3 and lite.rollouts_per_family == 1
     assert main.families == 30 and len(main.conditions) == 3 and main.rollouts_per_family == 5
     assert all(spec.paired_facts and spec.closing_attestation for spec in (pilot, lite, main))
+
+
+def test_cli_leaderboard_skips_unfinished_run_dirs(module_run, tmp_path) -> None:
+    from click.testing import CliRunner
+
+    from end_bench.cli import cli
+
+    _, out = module_run
+    unfinished = tmp_path / "unfinished-run"
+    unfinished.mkdir()
+    (unfinished / "run_manifest.json").write_text("{}")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["module", "leaderboard", "deception_under_incentive", str(out / "mod-smoke"), str(unfinished)])
+    assert result.exit_code == 0, result.output
+    assert "skipped" in result.output and "unfinished-run" in result.output
+    assert "| mod-smoke |" in result.output
+    nothing = runner.invoke(cli, ["module", "leaderboard", "deception_under_incentive", str(unfinished)])
+    assert nothing.exit_code != 0 and "no finished runs" in nothing.output
