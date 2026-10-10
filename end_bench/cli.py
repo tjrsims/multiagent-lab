@@ -226,28 +226,69 @@ def pool(dataset_paths, out_path, allow_mixed_registry):
 @click.option('--region', default="us-east-1", show_default=True)
 @click.option('--n-bootstrap', type=int, default=1000, show_default=True)
 @click.option('--bin-width', type=float, default=5.0, show_default=True)
-def judge(dataset_path, out_dir, judges, access, region, n_bootstrap, bin_width):
+@click.option('--subset', default='all', show_default=True,
+              help="Rows to judge: 'all', 'paired' (members of matched pairs only), or 'batch:<dir>' "
+                   "(the rows of an adjudication batch exported from this same dataset).")
+@click.option('--workers', type=click.IntRange(min=1), default=1, show_default=True,
+              help='Parallel judge calls per judge; answers are cached as they arrive.')
+def judge(dataset_path, out_dir, judges, access, region, n_bootstrap, bin_width, subset, workers):
     """Score LLM judges against computed truth, transcript-only and fact-informed."""
-    from end_bench.judges import JudgeAccess, JudgeCache, run_judge, score_judges
+    from end_bench.judges import JudgeAccess, JudgeCache, restrict_pairs, run_judge, score_judges
+    from end_bench.models.pricing import CostLedger
     from interpretability.benchmark.pairs import build_matched_pairs, pair_scopes_for_views, twin_ids_for_views
+    from interpretability.benchmark.views import subset_views
 
-    dataset, views = _load_views(dataset_path)
+    dataset, full_views = _load_views(dataset_path)
     target = Path(out_dir); target.mkdir(parents=True, exist_ok=True)
+    full_pairs = build_matched_pairs(
+        full_views.labels, full_views.claim_values, full_views.scenarios, full_views.group_ids, bin_width=bin_width,
+        twin_ids=twin_ids_for_views(full_views), scopes=pair_scopes_for_views(full_views),
+    )
+    selection = {"subset": subset, "n_rows_total": full_views.n, "pairs_total": full_pairs.n_pairs}
+    if subset == 'all':
+        views, pairs = full_views, full_pairs
+    elif subset == 'paired':
+        indices = [int(i) for i in full_pairs.paired_row_indices()]
+        views, pairs = subset_views(full_views, indices), restrict_pairs(full_pairs, indices)
+    elif subset.startswith('batch:'):
+        key_path = Path(subset[len('batch:'):]) / "private" / "KEY.json"
+        if not key_path.exists():
+            raise click.UsageError(f"{key_path} not found; 'batch:<dir>' needs an exported adjudication batch")
+        key = json.loads(key_path.read_text(encoding="utf-8"))
+        indices = sorted({int(item["row_index"]) for item in key.values() if item.get("row_index") is not None})
+        for item in key.values():
+            row = item.get("row_index")
+            if row is not None and str(full_views.group_ids[int(row)]) != str(item.get("group_id")):
+                raise click.UsageError("the batch was exported from a different dataset: group ids do not line up")
+        views, pairs = subset_views(full_views, indices), restrict_pairs(full_pairs, indices)
+        selection["batch"] = str(Path(subset[len('batch:'):]))
+    else:
+        raise click.UsageError("--subset must be 'all', 'paired', or 'batch:<dir>'")
+    selection["n_rows"] = views.n
+    selection["pairs"] = pairs.n_pairs
+    click.echo(f"  rows judged: {views.n}/{full_views.n} (subset={subset}); matched pairs: {pairs.n_pairs}/{full_pairs.n_pairs}")
     cache = JudgeCache(path=target / "judge_cache.jsonl")
     accesses = [JudgeAccess.TRANSCRIPT_ONLY, JudgeAccess.FACT_INFORMED] if access == 'both' else [JudgeAccess(access)]
     runs = []
+    costs = {}
     for spec in judges:
-        model = _judge_model(spec, region)
+        ledger = CostLedger(path=target / "judge_cost_ledger.jsonl") if spec != "oracle" else None
+        model = _judge_model(spec, region, ledger)
         for mode in accesses:
-            runs.append(run_judge(views, model, access=mode, judge_name=spec, cache=cache))
+            def _progress(done, total, _spec=spec, _mode=mode.value):
+                if done == total or done % 200 == 0:
+                    click.echo(f"    {_spec} [{_mode}] {done}/{total} calls", err=True)
+            runs.append(run_judge(views, model, access=mode, judge_name=spec, cache=cache, workers=workers, progress=_progress))
             click.echo(f"  judged {spec} [{mode.value}]: undetermined={runs[-1].n_undetermined}/{views.n} cache_hits={runs[-1].cache_hits}")
-    pairs = build_matched_pairs(
-        views.labels, views.claim_values, views.scenarios, views.group_ids, bin_width=bin_width,
-        twin_ids=twin_ids_for_views(views), scopes=pair_scopes_for_views(views),
-    )
-    click.echo(f"  matched pairs: {pairs.n_pairs} (twins first; pairs never cross a source run)")
+        if ledger is not None:
+            costs[spec] = ledger.totals()
+            click.echo(f"  cost {spec}: ${costs[spec].get('usd', 0.0):.2f} over {costs[spec].get('calls', 0)} calls")
     card = score_judges(views, runs, pairs=pairs, n_bootstrap=n_bootstrap)
-    (target / "judges.json").write_text(json.dumps(card.to_dict(), indent=2, sort_keys=True))
+    payload = card.to_dict()
+    payload["selection"] = selection
+    payload["costs"] = costs
+    payload["dataset"] = {"path": str(dataset_path), "dataset_hash": (dataset.get("config") or {}).get("dataset_hash")}
+    (target / "judges.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
     for score in card.detector_scores:
         a = score.auroc
         click.echo(f"  {score.detector:40s} {score.subset:7s} n={score.n_rows:4d} AUROC={a.value:.3f} [{a.ci_low:.3f}, {a.ci_high:.3f}]")
@@ -476,7 +517,7 @@ def _load_views(dataset_path):
     return dataset, build_views(dataset)
 
 
-def _judge_model(spec: str, region: str):
+def _judge_model(spec: str, region: str, cost_ledger=None):
     if spec == "oracle":
         from end_bench.models.oracle_judge import OracleJudgeModel
 
@@ -484,7 +525,7 @@ def _judge_model(spec: str, region: str):
     if spec.startswith("bedrock:"):
         from end_bench.models.bedrock import BedrockTextModel
 
-        return BedrockTextModel(spec, region=region, max_tokens=200, temperature=0.0)
+        return BedrockTextModel(spec, region=region, max_tokens=200, temperature=0.0, cost_ledger=cost_ledger)
     raise click.UsageError(f"unsupported judge {spec!r}; use 'oracle' or 'bedrock:<model_id>'")
 
 

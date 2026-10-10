@@ -51,6 +51,7 @@ After a run (all offline):
 ```bash
 end-bench pool       --dataset runs/<a>/text_dataset.json --dataset runs/<b>/text_dataset.json --out pooled/text_dataset.json
 end-bench judge      --dataset runs/<id>/text_dataset.json --out builds/<id> --judge oracle          # or --judge bedrock:<model_id>; a pooled dataset works too
+end-bench judge      --dataset pooled/text_dataset.json --out judges/paired --judge bedrock:<id> --subset paired --workers 8   # twins only, 8 parallel calls; --subset batch:<dir> judges an exported human batch
 end-bench outcomes   --dataset runs/<id>/text_dataset.json --out builds/<id>
 end-bench adjudicate export --dataset runs/<id>/text_dataset.json --out batches/<id> --n 300
 end-bench adjudicate import --batch batches/<id> --ratings r1.csv --ratings r2.csv --ratings r3.csv \

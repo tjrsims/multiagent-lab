@@ -102,3 +102,108 @@ def test_oracle_judge_is_perfect_with_facts_and_abstains_without(session_dataset
     payload = card.to_dict()
     json.dumps(payload)
     assert payload["runs"][0]["n_rows"] == views.n
+
+
+class _ThreadSafeCountingModel:
+    model_name = "counting-threaded"
+
+    def __init__(self, answer):
+        import threading
+
+        self.answer = answer
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def sample_text(self, prompt, **_):
+        with self._lock:
+            self.calls += 1
+        return self.answer
+
+
+def test_threaded_run_judge_matches_serial_and_caches(session_dataset, tmp_path) -> None:
+    views = build_views(session_dataset)
+    serial_model = _ThreadSafeCountingModel('{"false_claim": false, "confidence": 0.7}')
+    serial = run_judge(views, serial_model, access="fact_informed", judge_name="c", cache=JudgeCache(path=None))
+    threaded_model = _ThreadSafeCountingModel('{"false_claim": false, "confidence": 0.7}')
+    seen = []
+    threaded = run_judge(
+        views, threaded_model, access="fact_informed", judge_name="c",
+        cache=JudgeCache(path=tmp_path / "cache.jsonl"), workers=4, progress=lambda done, total: seen.append((done, total)),
+    )
+    assert threaded.scores.tolist() == serial.scores.tolist()
+    assert threaded_model.calls == serial_model.calls == views.n - threaded.cache_hits
+    assert seen[-1] == (threaded_model.calls, threaded_model.calls)
+    resumed = run_judge(views, threaded_model, access="fact_informed", judge_name="c", cache=JudgeCache(path=tmp_path / "cache.jsonl"), workers=4)
+    assert resumed.cache_hits == views.n
+    with pytest.raises(ValueError):
+        run_judge(views, threaded_model, access="fact_informed", judge_name="c", workers=0)
+
+
+def test_threaded_run_judge_fails_closed_on_a_broken_judge(session_dataset, tmp_path) -> None:
+    views = build_views(session_dataset)
+
+    class _Broken:
+        model_name = "broken"
+
+        def sample_text(self, prompt, **_):
+            raise RuntimeError("throttled for good")
+
+    with pytest.raises(RuntimeError, match="throttled"):
+        run_judge(views, _Broken(), access="transcript_only", judge_name="b", cache=JudgeCache(path=tmp_path / "c.jsonl"), workers=3)
+
+
+def test_restrict_pairs_and_subset_views_line_up(session_dataset) -> None:
+    from end_bench.judges import restrict_pairs
+    from interpretability.benchmark.pairs import twin_ids_for_views
+    from interpretability.benchmark.views import ViewsError, subset_views
+
+    views = build_views(session_dataset)
+    pairs = build_matched_pairs(views.labels, views.claim_values, views.scenarios, views.group_ids, twin_ids=twin_ids_for_views(views))
+    assert pairs.n_pairs > 0
+    indices = [int(i) for i in pairs.paired_row_indices()]
+    sub = subset_views(views, indices)
+    assert sub.n == len(indices)
+    assert sub.report is views.report
+    assert [sub.trial_ids[k] for k in range(sub.n)] == [views.trial_ids[i] for i in indices]
+    assert sub.labels.tolist() == [int(views.labels[i]) for i in indices]
+    restricted = restrict_pairs(pairs, indices)
+    assert restricted.n_pairs == pairs.n_pairs
+    for k in range(restricted.n_pairs):
+        assert sub.trial_ids[restricted.positive_indices[k]] == views.trial_ids[pairs.positive_indices[k]]
+        assert sub.labels[restricted.positive_indices[k]] == 1 and sub.labels[restricted.negative_indices[k]] == 0
+    partial = restrict_pairs(pairs, indices[:1])
+    assert partial.n_pairs == 0 and partial.parameters["pairs_before_restriction"] == pairs.n_pairs
+    with pytest.raises(ViewsError):
+        subset_views(views, [0, 0])
+    with pytest.raises(ViewsError):
+        subset_views(views, [views.n])
+
+
+def test_judge_cli_subsets_paired_and_batch_rows(session_smoke_run, tmp_path) -> None:
+    from click.testing import CliRunner
+
+    from end_bench.cli import cli
+
+    dataset = str(session_smoke_run.text_dataset_path)
+    runner = CliRunner()
+    paired = runner.invoke(cli, ["judge", "--dataset", dataset, "--out", str(tmp_path / "paired"), "--judge", "oracle",
+                                 "--subset", "paired", "--n-bootstrap", "20", "--workers", "2"])
+    assert paired.exit_code == 0, paired.output
+    payload = json.loads((tmp_path / "paired" / "judges.json").read_text())
+    assert payload["selection"]["subset"] == "paired"
+    assert payload["selection"]["n_rows"] < payload["selection"]["n_rows_total"]
+    assert payload["selection"]["pairs"] == payload["selection"]["pairs_total"]
+    assert payload["costs"] == {} and payload["dataset"]["dataset_hash"].startswith("sha256:")
+
+    export = runner.invoke(cli, ["adjudicate", "export", "--dataset", dataset, "--out", str(tmp_path / "batch"), "--n", "6", "--gold-fraction", "0.0"])
+    assert export.exit_code == 0, export.output
+    batch = runner.invoke(cli, ["judge", "--dataset", dataset, "--out", str(tmp_path / "batch_judge"), "--judge", "oracle",
+                                "--subset", f"batch:{tmp_path / 'batch'}", "--n-bootstrap", "20"])
+    assert batch.exit_code == 0, batch.output
+    payload = json.loads((tmp_path / "batch_judge" / "judges.json").read_text())
+    assert payload["selection"]["n_rows"] == 6 and payload["selection"]["batch"].endswith("batch")
+
+    bad = runner.invoke(cli, ["judge", "--dataset", dataset, "--out", str(tmp_path / "bad"), "--judge", "oracle", "--subset", "nonsense"])
+    assert bad.exit_code != 0 and "--subset" in bad.output
+    missing = runner.invoke(cli, ["judge", "--dataset", dataset, "--out", str(tmp_path / "bad2"), "--judge", "oracle", "--subset", f"batch:{tmp_path / 'nowhere'}"])
+    assert missing.exit_code != 0 and "not found" in missing.output

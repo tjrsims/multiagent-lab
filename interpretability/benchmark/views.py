@@ -616,9 +616,38 @@ def build_views(
     )
 
 
+def subset_views(views: BenchmarkViews, indices: Sequence[int]) -> BenchmarkViews:
+    """The same views restricted to ``indices`` (in the given order).
+
+    Every index-aligned field is re-indexed; ``report`` still describes the
+    full views it came from, so callers that persist a subset must record the
+    selection themselves. Duplicate or out-of-range indices are refused.
+    """
+    import dataclasses
+
+    chosen = [int(item) for item in indices]
+    if len(set(chosen)) != len(chosen):
+        raise ViewsError("subset indices must be unique")
+    if any(item < 0 or item >= views.n for item in chosen):
+        raise ViewsError("subset index out of range")
+    replacements: dict[str, Any] = {}
+    for item in dataclasses.fields(views):
+        value = getattr(views, item.name)
+        if item.name == "activations":
+            replacements[item.name] = {layer: matrix[chosen] for layer, matrix in value.items()}
+        elif item.name == "report":
+            continue
+        elif isinstance(value, np.ndarray) and value.shape[:1] == (views.n,):
+            replacements[item.name] = value[chosen]
+        elif isinstance(value, tuple) and len(value) == views.n:
+            replacements[item.name] = tuple(value[i] for i in chosen)
+    return dataclasses.replace(views, **replacements)
+
+
 __all__ = [
     "STRUCTURED_EVIDENCE_SCENARIOS",
     "attach_partitions",
+    "subset_views",
     "VIEWS_VERSION",
     "BenchmarkViews",
     "ViewsError",
