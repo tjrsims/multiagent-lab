@@ -33,6 +33,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
@@ -231,6 +232,8 @@ def run_judge(
     temperature: float = 0.0,
     workers: int = 1,
     progress: Callable[[int, int], None] | None = None,
+    rate_per_minute: float | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> JudgeRun:
     """Query the judge for every row; cache raw answers; never invent labels.
 
@@ -238,13 +241,19 @@ def run_judge(
     ``workers`` above one, distinct prompts are sent from a thread pool; raw
     answers are written to the cache from the calling thread as they arrive,
     so a run that dies mid-way resumes from the cache. ``progress`` receives
-    ``(done, total)`` after each model call.
+    ``(done, total)`` after each model call. ``rate_per_minute`` spaces out
+    submissions so a judge stays under its Bedrock request quota instead of
+    burning its retries on throttling; without it the pool submits as fast as
+    the workers free up.
     """
     mode = JudgeAccess(access)
     if not callable(getattr(model, "sample_text", None)):
         raise TypeError("judge model must implement sample_text()")
     if type(workers) is not int or workers < 1:
         raise ValueError("workers must be a positive integer")
+    if rate_per_minute is not None and not (isinstance(rate_per_minute, (int, float)) and rate_per_minute > 0):
+        raise ValueError("rate_per_minute must be a positive number")
+    interval = 60.0 / float(rate_per_minute) if rate_per_minute else 0.0
     model_name = str(getattr(model, "model_name", type(model).__name__))
     store = cache if cache is not None else JudgeCache(path=None)
     keys: list[str] = []
@@ -267,8 +276,19 @@ def run_judge(
 
     total = len(pending)
     done = 0
+    last_submit = [0.0]
+
+    def pace() -> None:
+        if interval <= 0:
+            return
+        wait = last_submit[0] + interval - time.monotonic()
+        if wait > 0:
+            sleep(wait)
+        last_submit[0] = time.monotonic()
+
     if workers == 1 or total <= 1:
         for item in pending.items():
+            pace()
             key, raw = fetch(item)
             store.put(key, raw)
             done += 1
@@ -276,8 +296,19 @@ def run_judge(
                 progress(done, total)
     else:
         with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
-            futures = [pool.submit(fetch, item) for item in pending.items()]
+            futures = []
             try:
+                for item in pending.items():
+                    pace()
+                    futures.append(pool.submit(fetch, item))
+                    # Drain finished answers as we go so the cache stays current.
+                    for future in [f for f in futures if f.done()]:
+                        futures.remove(future)
+                        key, raw = future.result()
+                        store.put(key, raw)
+                        done += 1
+                        if progress is not None:
+                            progress(done, total)
                 for future in as_completed(futures):
                     key, raw = future.result()
                     store.put(key, raw)

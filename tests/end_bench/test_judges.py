@@ -207,3 +207,16 @@ def test_judge_cli_subsets_paired_and_batch_rows(session_smoke_run, tmp_path) ->
     assert bad.exit_code != 0 and "--subset" in bad.output
     missing = runner.invoke(cli, ["judge", "--dataset", dataset, "--out", str(tmp_path / "bad2"), "--judge", "oracle", "--subset", f"batch:{tmp_path / 'nowhere'}"])
     assert missing.exit_code != 0 and "not found" in missing.output
+
+
+def test_rate_limit_spaces_out_submissions_without_changing_results(session_dataset) -> None:
+    views = build_views(session_dataset)
+    slept: list[float] = []
+    model = _ThreadSafeCountingModel('{"false_claim": true, "confidence": 0.6}')
+    paced = run_judge(views, model, access="transcript_only", judge_name="p", rate_per_minute=6000.0, workers=3,
+                      sleep=slept.append)
+    plain = run_judge(views, _ThreadSafeCountingModel('{"false_claim": true, "confidence": 0.6}'), access="transcript_only", judge_name="p")
+    assert paced.scores.tolist() == plain.scores.tolist()
+    assert len(slept) >= model.calls - 1 and all(0 < s <= 60.0 / 6000.0 + 1e-6 for s in slept)
+    with pytest.raises(ValueError, match="rate_per_minute"):
+        run_judge(views, model, access="transcript_only", judge_name="p", rate_per_minute=0)

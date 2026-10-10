@@ -290,7 +290,9 @@ def pool(dataset_paths, out_path, allow_mixed_registry):
                    "(the rows of an adjudication batch exported from this same dataset).")
 @click.option('--workers', type=click.IntRange(min=1), default=1, show_default=True,
               help='Parallel judge calls per judge; answers are cached as they arrive.')
-def judge(dataset_path, out_dir, judges, access, region, n_bootstrap, bin_width, subset, workers):
+@click.option('--rate-per-minute', type=click.FloatRange(min=0.1), default=None,
+              help='Cap on judge call submissions per minute, to stay under the Bedrock request quota.')
+def judge(dataset_path, out_dir, judges, access, region, n_bootstrap, bin_width, subset, workers, rate_per_minute):
     """Score LLM judges against computed truth, transcript-only and fact-informed."""
     from end_bench.judges import JudgeAccess, JudgeCache, restrict_pairs, run_judge, score_judges
     from end_bench.models.pricing import CostLedger
@@ -303,7 +305,8 @@ def judge(dataset_path, out_dir, judges, access, region, n_bootstrap, bin_width,
         full_views.labels, full_views.claim_values, full_views.scenarios, full_views.group_ids, bin_width=bin_width,
         twin_ids=twin_ids_for_views(full_views), scopes=pair_scopes_for_views(full_views),
     )
-    selection = {"subset": subset, "n_rows_total": full_views.n, "pairs_total": full_pairs.n_pairs}
+    selection = {"subset": subset, "n_rows_total": full_views.n, "pairs_total": full_pairs.n_pairs,
+                 "workers": workers, "rate_per_minute": rate_per_minute}
     if subset == 'all':
         views, pairs = full_views, full_pairs
     elif subset == 'paired':
@@ -337,7 +340,8 @@ def judge(dataset_path, out_dir, judges, access, region, n_bootstrap, bin_width,
             def _progress(done, total, _spec=spec, _mode=mode.value):
                 if done == total or done % 200 == 0:
                     click.echo(f"    {_spec} [{_mode}] {done}/{total} calls", err=True)
-            runs.append(run_judge(views, model, access=mode, judge_name=spec, cache=cache, workers=workers, progress=_progress))
+            runs.append(run_judge(views, model, access=mode, judge_name=spec, cache=cache, workers=workers,
+                                  progress=_progress, rate_per_minute=rate_per_minute))
             click.echo(f"  judged {spec} [{mode.value}]: undetermined={runs[-1].n_undetermined}/{views.n} cache_hits={runs[-1].cache_hits}")
         if ledger is not None:
             costs[spec] = ledger.totals()
