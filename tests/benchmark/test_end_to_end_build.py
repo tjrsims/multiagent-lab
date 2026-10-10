@@ -61,7 +61,8 @@ def test_build_benchmark_writes_stable_manifest_and_oracle_sits_at_chance(golden
     assert manifest["manifest_id"] == first.manifest.manifest_id
     assert manifest["rule_version"] == "negotiation-rules/2"
     assert manifest["split_manifest_id"] == first.split_manifest.manifest_id
-    assert first.pairs.n_pairs == 10
+    assert first.pairs.parameters["pairs_over_all_rows"] == 10
+    assert first.pairs.n_pairs == 2, "scoring pairs are built inside the test split"
     assert all(bal.twin_pairs == bal.pairs_formed for bal in first.pairs.bins)
 
     scores = {(s.detector, s.subset): s for s in first.scorecard.detector_scores}
@@ -103,10 +104,30 @@ def test_benchmark_cli_builds_and_reports(golden_path, tmp_path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert "benchmark manifest bench_" in result.output
-    assert "matched pairs: 10" in result.output
+    assert "matched pairs: 2 inside the test split (10 over all rows)" in result.output
     assert "stated_claim_oracle" in result.output
     assert (tmp_path / "out" / "manifest.json").exists()
     bad = CliRunner().invoke(
         cli, ["benchmark", "build", "--dataset", str(tmp_path / "missing.json"), "--out", str(tmp_path / "x")],
     )
     assert bad.exit_code != 0
+
+
+def test_paired_scoring_keeps_both_members_inside_the_scoring_partition(golden_path, tmp_path) -> None:
+    """Pairs built over all rows and filtered to the test split left most scored
+    rows without their partner, and the stated claim oracle read 0.89 on that
+    unbalanced subset of a pooled live build while sitting at 0.50 over all pairs."""
+    result = build_benchmark(golden_path, tmp_path / "scored", n_bootstrap=30, split_seed=3, train_probe=False)
+    partitions = result.views.partitions
+    pairs = result.pairs
+    assert pairs.parameters["scoring_partition"] == "test"
+    assert pairs.parameters["pairs_over_all_rows"] >= pairs.n_pairs
+    for pos, neg in zip(pairs.positive_indices, pairs.negative_indices):
+        assert partitions[int(pos)] == "test" and partitions[int(neg)] == "test"
+    paired = [s for s in result.scorecard.detector_scores if s.subset == "paired"]
+    assert paired and all(s.n_rows == 2 * pairs.n_pairs for s in paired)
+    report = json.loads((tmp_path / "scored" / "pairs.json").read_text())
+    assert report["parameters"]["scoring_partition"] == "test"
+    unpartitioned = build_benchmark(golden_path, tmp_path / "all", n_bootstrap=30, split_seed=3, train_probe=False, scoring_partition=None)
+    assert "scoring_partition" not in unpartitioned.pairs.parameters
+    assert unpartitioned.pairs.n_pairs == pairs.parameters["pairs_over_all_rows"]

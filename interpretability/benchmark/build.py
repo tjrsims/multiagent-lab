@@ -53,7 +53,7 @@ from interpretability.benchmark.scoring import (
     score_detector,
 )
 from interpretability.benchmark.splits import build_split
-from interpretability.benchmark.views import BenchmarkViews, build_views, attach_partitions
+from interpretability.benchmark.views import BenchmarkViews, build_views, attach_partitions, subset_views
 from interpretability.data.activation_dataset import load_activation_dataset
 from interpretability.dyads.evaluation import roc_auc
 
@@ -151,6 +151,55 @@ def _pair_mask(views: BenchmarkViews, pairs: MatchedPairs) -> np.ndarray:
     return mask
 
 
+def _scoring_pairs(
+    views: BenchmarkViews,
+    scoring_partition: str | None,
+    split_manifest: Any,
+    *,
+    bin_width: float,
+    pair_seed: int,
+) -> MatchedPairs:
+    """Matched pairs for scoring, built inside the scoring partition.
+
+    Pairs built over every row and then filtered to a partition leave most
+    scored rows without their partner (the partner sits in train or dev), so
+    the "paired" subset stops being balanced pairs and the stated claim
+    oracle picks up signal it should not have. With a scoring partition the
+    pairs are therefore built among that partition's rows only and mapped
+    back to global indices; ``parameters`` records the partition and how many
+    pairs the whole dataset would have formed.
+    """
+    kwargs = dict(bin_width=bin_width, seed=pair_seed)
+    global_pairs = build_matched_pairs(
+        views.labels, views.claim_values, views.scenarios, views.group_ids,
+        twin_ids=twin_ids_for_views(views), scopes=pair_scopes_for_views(views), **kwargs,
+    )
+    if scoring_partition is None:
+        return global_pairs
+    scoped = views if views.partitions else attach_partitions(views, split_manifest)
+    indices = [i for i, part in enumerate(scoped.partitions) if part == scoring_partition]
+    if not indices:
+        return global_pairs
+    inside = subset_views(scoped, indices)
+    local = build_matched_pairs(
+        inside.labels, inside.claim_values, inside.scenarios, inside.group_ids,
+        twin_ids=twin_ids_for_views(inside), scopes=pair_scopes_for_views(inside), **kwargs,
+    )
+    back = np.asarray(indices, dtype=int)
+    return MatchedPairs(
+        pair_ids=local.pair_ids,
+        positive_indices=back[local.positive_indices] if local.n_pairs else local.positive_indices,
+        negative_indices=back[local.negative_indices] if local.n_pairs else local.negative_indices,
+        bins=local.bins, bin_width=local.bin_width, seed=local.seed,
+        parameters={
+            **dict(local.parameters),
+            "scoring_partition": scoring_partition,
+            "rows_in_partition": len(indices),
+            "pairs_over_all_rows": global_pairs.n_pairs,
+        },
+    )
+
+
 def _try_score(
     name: str,
     scores: np.ndarray,
@@ -233,10 +282,9 @@ def build_benchmark(
         # so in the scorecard rather than silently scoring an empty subset.
         scoring_partition = None
         train_probe = False
-    pairs = build_matched_pairs(
-        views.labels, views.claim_values, views.scenarios, views.group_ids,
-        bin_width=bin_width, seed=pair_seed, twin_ids=twin_ids_for_views(views),
-        scopes=pair_scopes_for_views(views),
+    pairs = _scoring_pairs(
+        views, scoring_partition, split_manifest,
+        bin_width=bin_width, pair_seed=pair_seed,
     )
     pair_mask = _pair_mask(views, pairs)
 

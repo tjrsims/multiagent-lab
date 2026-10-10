@@ -1172,7 +1172,12 @@ def benchmark_build(dataset_path, out_dir, label_source, rows, qc, group_key,
         click.echo("  excluded: " + ", ".join(
             f"{reason}={count}" for reason, count in sorted(report.excluded.items())
         ))
-    click.echo(f"  matched pairs: {result.pairs.n_pairs}")
+    pair_params = dict(result.pairs.parameters)
+    if pair_params.get("scoring_partition"):
+        click.echo(f"  matched pairs: {result.pairs.n_pairs} inside the {pair_params['scoring_partition']} split "
+                   f"({pair_params.get('pairs_over_all_rows')} over all rows)")
+    else:
+        click.echo(f"  matched pairs: {result.pairs.n_pairs}")
     if result.probe_selection is not None:
         click.echo(f"  probe layer (dev-selected): {result.probe_selection.layer}")
     for score in result.scorecard.detector_scores:

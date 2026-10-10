@@ -176,7 +176,12 @@ def build(dataset_path, out_dir, label_source, rows, bin_width, split_seed, n_bo
     click.echo(f"  rows kept: {report.n_kept}/{report.n_input_rows} (groups={report.n_groups})")
     if report.excluded:
         click.echo("  excluded: " + ", ".join(f"{k}={v}" for k, v in sorted(report.excluded.items())))
-    click.echo(f"  matched pairs: {result.pairs.n_pairs}")
+    pair_params = dict(result.pairs.parameters)
+    if pair_params.get("scoring_partition"):
+        click.echo(f"  matched pairs: {result.pairs.n_pairs} inside the {pair_params['scoring_partition']} split "
+                   f"({pair_params.get('pairs_over_all_rows')} over all rows)")
+    else:
+        click.echo(f"  matched pairs: {result.pairs.n_pairs}")
     for score in result.scorecard.detector_scores:
         a = score.auroc
         click.echo(f"  {score.detector:22s} {score.subset:7s} n={score.n_rows:4d} "
