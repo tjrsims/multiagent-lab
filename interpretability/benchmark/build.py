@@ -247,6 +247,7 @@ def build_benchmark(
         "fact_informed_rule": fact_informed_rule_scores(
             views.scenarios, views.responses, views.private_facts,
             tolerances=views.tolerances or None,
+            dialogue_history=views.dialogue_history or None,
         ),
     }
     probe_selection: ProbeSelection | None = None
