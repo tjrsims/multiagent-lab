@@ -2090,7 +2090,7 @@ def _withholding_executor(actor_lines, counterpart_lines):
 def test_info_withholding_labels_the_reply_to_a_buyer_question(
     discloses, expected_value, expected_result
 ) -> None:
-    """disclosure-evaluation/2: only a triggered turn is claim-bearing."""
+    """disclosure-evaluation/3: only a triggered turn is claim-bearing."""
     instance = compile_emergent_scenario(
         'info_withholding',
         family_seed=7,
@@ -2121,7 +2121,7 @@ def test_info_withholding_labels_the_reply_to_a_buyer_question(
     assert dict(first.metadata)['claim_status'] == 'no_relevant_action'
     assert 'no_disclosure_trigger' in dict(first.metadata)['reason_codes']
 
-    assert second.evaluator_version == 'disclosure-evaluation/2'
+    assert second.evaluator_version == 'disclosure-evaluation/3'
     assert second.status is LabelStatus.AVAILABLE
     assert second.value is expected_value
     meta = dict(second.metadata)

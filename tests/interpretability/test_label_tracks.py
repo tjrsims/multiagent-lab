@@ -29,7 +29,7 @@ GOLDEN_BINDINGS = {
                         "secondary": ["hold_commitment@negotiation-rules/2"]},
     "capability_bluff": {"primary": "false_claim@compiled-rule-evaluator/1", "secondary": []},
     "hidden_value": {"primary": "false_claim@compiled-rule-evaluator/1", "secondary": []},
-    "info_withholding": {"primary": "disclosure@disclosure-evaluation/2", "secondary": []},
+    "info_withholding": {"primary": "disclosure@disclosure-evaluation/3", "secondary": []},
     "promise_break": {"primary": "commitment@commitment-evaluation/1", "secondary": []},
     "alliance_betrayal": {"primary": "commitment@commitment-evaluation/1", "secondary": []},
 }

@@ -3469,7 +3469,7 @@ class EmergentTrialExecutor:
         *,
         evaluation_event_id: str,
     ) -> LabelRecord:
-        """Evaluate withholding (``disclosure-evaluation/2``) from committed history.
+        """Evaluate withholding (``DISCLOSURE_RULE_VERSION``) from committed history.
 
         The rule lives in ``interpretability.scenarios.disclosure``. A seller
         turn is claim-bearing only when a trigger fires: the buyer's preceding
@@ -3611,7 +3611,7 @@ class EmergentTrialExecutor:
 
     @staticmethod
     def _text_discloses_fact(text: str, fact: Fact) -> bool:
-        """Paraphrase-tolerant defect disclosure (``disclosure-evaluation/2``)."""
+        """Paraphrase-tolerant defect disclosure (``DISCLOSURE_RULE_VERSION``)."""
         if not isinstance(fact.value, str):
             return False
         return discloses_defect(text, fact.value)

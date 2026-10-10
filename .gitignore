@@ -125,3 +125,7 @@ figures/
 # Local-only planning and implementation notes (never pushed)
 benchmark_planning/
 implementation_plans/
+
+# END-Bench text dataset package (the data/ rule above is for run outputs)
+!/end_bench/data/
+!/end_bench/data/*.py
