@@ -217,5 +217,5 @@ def test_anthropic_models_get_temperature_only_and_others_keep_top_p() -> None:
     BedrockTextModel("amazon.nova-pro-v1:0", client=nova, temperature=0.5).sample_text("hi")
     assert nova.requests[0]["inferenceConfig"]["topP"] == 0.9
     explicit = Capture()
-    BedrockTextModel("global.anthropic.claude-sonnet-4-6", client=explicit, top_p=0.8).sample_text("hi")
-    assert explicit.requests[0]["inferenceConfig"]["topP"] == 0.8  # a caller who insists gets it
+    BedrockTextModel("global.anthropic.claude-sonnet-4-6", client=explicit, top_p=0.8).sample_text("hi", top_p=0.8)
+    assert "topP" not in explicit.requests[0]["inferenceConfig"]  # never sent, even when asked for

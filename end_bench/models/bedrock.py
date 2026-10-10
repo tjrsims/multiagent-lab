@@ -125,11 +125,10 @@ class BedrockTextModel(language_model.LanguageModel):
         self.default_temperature = float(temperature)
         # Anthropic models on Bedrock reject a request that sets both
         # temperature and top_p ("cannot both be specified for this model"),
-        # so they get temperature only unless a caller insists on top_p.
-        self.default_top_p = (
-            None if top_p == 0.9 and "anthropic." in self.model_id
-            else (None if top_p is None else float(top_p))
-        )
+        # so they never get topP. The requested value is still recorded in
+        # the sampling provenance; the effective value is recorded as not sent.
+        self.anthropic = "anthropic." in self.model_id
+        self.default_top_p = None if (self.anthropic or top_p is None) else float(top_p)
         self.last_error: str | None = None
         self.failed_calls = 0
         self.system_prompt = system_prompt
@@ -243,7 +242,8 @@ class BedrockTextModel(language_model.LanguageModel):
             float(temperature) if temperature is not None else self.default_temperature
         )
         effective_temperature = min(max(effective_temperature, 0.0), 1.0)
-        effective_top_p = float(top_p) if top_p is not None else self.default_top_p  # None omits topP
+        requested_top_p = float(top_p) if top_p is not None else (self.default_top_p if self.default_top_p is not None else 1.0)
+        effective_top_p = None if self.anthropic else (float(top_p) if top_p is not None else self.default_top_p)  # None omits topP
         started = time.monotonic()
         response, retries = self._converse(
             prompt,
@@ -281,7 +281,7 @@ class BedrockTextModel(language_model.LanguageModel):
             # When topP is not sent (Anthropic), Bedrock's default of no
             # nucleus truncation applies: requested 1.0, effective recorded as
             # None (not sent).
-            top_p=effective_top_p if effective_top_p is not None else 1.0,
+            top_p=requested_top_p,
             top_k=int(top_k) if top_k is not None else 0,
             seed=seed,
             effective_temperature=effective_temperature,
