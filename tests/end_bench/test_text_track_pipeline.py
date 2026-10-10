@@ -209,3 +209,32 @@ def test_zero_row_run_reports_the_last_model_error(tmp_path, monkeypatch) -> Non
                    families=1, max_rounds=1, rollouts_per_family=1, paired_facts=False, run_id="flaky")
     with pytest.raises(RunSpecError, match="zero rows.*ThrottlingException"):
         run_text_track(spec, tmp_path)
+
+
+def test_generation_records_carry_the_run_id_so_runs_never_share_call_ids(smoke_run, tmp_path) -> None:
+    """Two runs of one design used to derive identical call ids (the executor
+    stamped every run as ``interpretability:0``); the END-Bench run id now
+    names every record, so pooled datasets and audits can tell runs apart."""
+    first = load_text_dataset(smoke_run.text_dataset_path)
+    assert {record["run_id"] for record in first["generation_records"]} == {"smoke-test"}
+    spec = RunSpec(
+        model="scripted", scenarios=("hidden_value",), conditions=("high_incentive",),
+        families=1, max_rounds=1, rollouts_per_family=1, paired_facts=True, run_id="smoke-test-b",
+    )
+    second = load_text_dataset(run_text_track(spec, tmp_path).text_dataset_path)
+    assert {record["run_id"] for record in second["generation_records"]} == {"smoke-test-b"}
+    first_ids = {record["call_id"] for record in first["generation_records"]}
+    second_ids = {record["call_id"] for record in second["generation_records"]}
+    assert first_ids.isdisjoint(second_ids)
+    # Trial ids are design identity (scenario, family, assignment) and stay shared across runs.
+    first_trials = {row["trial_id"] for row in first["metadata"] if row["scenario"] == "hidden_value"}
+    second_trials = {row["trial_id"] for row in second["metadata"]}
+    assert second_trials <= first_trials
+
+
+def test_runner_rejects_a_blank_run_id() -> None:
+    with pytest.raises(ValueError, match="run_id"):
+        InterpretabilityRunner(
+            model_name="scripted", device="cpu", max_tokens=8, evaluator_api=None, evaluator_type="rule",
+            experiment_track="text_only", captured_actor_ids=(), model=ScriptedTextModel(), run_id="  ",
+        )

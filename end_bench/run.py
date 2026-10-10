@@ -212,6 +212,7 @@ def run_text_track(
         experiment_track="text_only",
         captured_actor_ids=(),
         model=model,
+        run_id=spec.run_id,
     )
     results = runner.run_all_emergent_scenarios(
         scenarios=list(spec.scenarios),

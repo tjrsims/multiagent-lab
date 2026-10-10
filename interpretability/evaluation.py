@@ -1669,6 +1669,7 @@ class InterpretabilityRunner:
         ),
         captured_actor_ids: Optional[Sequence[str]] = None,
         model: Optional[Any] = None,
+        run_id: Optional[str] = None,
     ):
         """``model`` injects a ready acting model (e.g. an API adapter).
 
@@ -1765,6 +1766,13 @@ class InterpretabilityRunner:
         self._trial_id_offset = trial_id_offset
         self._trial_id = trial_id_offset  # Start from offset (default 0 for single-GPU)
         self._pod_id = trial_id_offset // 1000 if trial_id_offset > 0 else 0  # Pod ID derived from offset
+        # The run identity stamped into every generation record and call id.
+        # Without a caller-supplied run id, two runs of one design (even on
+        # different models) derive identical call ids, so END-Bench passes its
+        # run id here. Parallel pods keep a pod suffix so their ids never meet.
+        if run_id is not None and not str(run_id).strip():
+            raise ValueError("run_id must be a non-empty string when given")
+        self._run_id = None if run_id is None else str(run_id)
 
         self._gm_modules_used = []
         # Track component access failures for debugging
@@ -1799,6 +1807,20 @@ class InterpretabilityRunner:
                 model_name=evaluator_model_name,
                 max_tokens=evaluator_max_tokens,
             )
+
+
+    @property
+    def execution_run_id(self) -> str:
+        """Run identity stamped into generation records and call ids.
+
+        Legacy test doubles build the runner without ``__init__``, so this
+        falls back to the historical ``interpretability:<pod>`` constant.
+        """
+        run_id = getattr(self, '_run_id', None)
+        pod_id = getattr(self, '_pod_id', 0)
+        if run_id is None:
+            return f'interpretability:{pod_id}'
+        return run_id if pod_id == 0 else f'{run_id}:pod{pod_id}'
 
     def _get_last_sampling_config(self) -> Dict[str, Any]:
         getter = getattr(self.model, "get_last_sampling_config", None)
@@ -3944,7 +3966,7 @@ Example: yes, yes'''
             getattr(tokenizer, 'name_or_path', model_revision)
         )
         executor = EmergentTrialExecutor(
-            run_id=f'interpretability:{self._pod_id}',
+            run_id=self.execution_run_id,
             actor_builder=build_actor,
             counterpart_builder=build_counterpart,
             model_revision=model_revision,
