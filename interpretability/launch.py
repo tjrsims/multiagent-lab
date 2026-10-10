@@ -1,15 +1,41 @@
-"""Shared, fail-closed normalization for public experiment entry points."""
+"""Shared, fail-closed normalization for public experiment entry points.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This file is the fail-closed planner both CLIs call before any model loads:
+every ambiguous or unsupported flag combination raises instead of being
+silently "fixed", so a run can never drift from what its manifest records.
+1. `ExecutionSurfacePlan` is the frozen output: track, protocol, agent
+   modules, participants, which actors get activations captured, counterpart
+   policies, counterbalance schedule, prompt surfaces, and probe settings.
+2. `resolve_execution_surface()` turns raw CLI flags into that plan. Tracks
+   (from `tracks.py`) gate white-box capability: `text_only` captures no
+   activations at all, `single_agent_white_box`/`theory_of_mind` capture one
+   declared actor per trial, `bilateral_white_box` captures every participant.
+   `validate_track_assignment()` rejects any mismatch.
+3. `resolve_config_execution_surface()` does the same for an authoritative
+   ExperimentConfig JSON, rejecting every config field the public CLI cannot
+   yet honor (multi-seed, SAE, causal.enabled, custom probe defaults, ...)
+   rather than ignoring it.
+4. `PUBLIC_RESUME_LIMITATION` documents that there is no public resume:
+   recovery snapshots exist for audit and manual salvage only, because they
+   do not retain the full accumulator needed for exact schedule continuation.
+Where this fits: entry points (cli.py / run_deception_experiment.py) call
+this before agents, capture, labels, QC, dataset, or probes ever run.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
+from interpretability.scenarios.policy_registry import CounterpartPolicyRegistry
 from interpretability.scenarios.compiled import (
     CounterpartPolicy,
     ExecutionProtocol,
     SUPPORTED_COUNTERPART_POLICIES,
     SUPPORTED_SURFACE_VARIANTS,
+    policy_spec_for,
     validate_counterpart_policy,
     validate_execution_protocol,
     validate_surface_variant,
@@ -71,6 +97,11 @@ class ExecutionSurfacePlan:
     probe_mode: str
     run_probes: bool | None
     execution_design_scope: str
+    rollouts_per_family: int = 1
+    paired_facts: bool = False
+    # Content hashes of the counterpart policy specs, aligned with
+    # ``counterpart_types`` ('absent' for the solo protocol).
+    counterpart_policy_ids: tuple[str, ...] = ()
 
 
 def resolve_execution_surface(
@@ -87,10 +118,23 @@ def resolve_execution_surface(
     mode: str = "emergent",
     probe_mode: str = "auto",
     agent_modules: Sequence[str] | None = None,
+    rollouts_per_family: int = 1,
+    paired_facts: bool = False,
+    policy_registry: CounterpartPolicyRegistry | None = None,
 ) -> ExecutionSurfacePlan:
-    """Resolve tracks, modules, capture access, and protocol design exactly once."""
+    """Resolve tracks, modules, capture access, and protocol design exactly once.
+
+    ``rollouts_per_family`` repeats every counterbalance assignment with
+    distinct physical seeds so per-instance behavior has within-instance
+    variance (DAYJOB-style repeated attempts). Rollouts share the family and
+    therefore never straddle a split.
+    """
     if type(counterbalance) is not bool:
         raise TypeError("counterbalance must be a boolean")
+    if type(rollouts_per_family) is not int or rollouts_per_family < 1:
+        raise ValueError("rollouts_per_family must be a positive integer")
+    if type(paired_facts) is not bool:
+        raise TypeError("paired_facts must be a boolean")
     if type(counterbalance_seed) is not int or counterbalance_seed < 0:
         raise ValueError("counterbalance_seed must be a non-negative integer")
     if mode not in {"emergent", "instructed", "both"}:
@@ -228,7 +272,9 @@ def resolve_execution_surface(
             else (CounterpartPolicy.DEFAULT.value,)
         )
         normalized_policies = tuple(
-            validate_counterpart_policy(policy).value
+            policy_spec_for(
+                validate_counterpart_policy(policy, policy_registry), policy_registry
+            ).name
             for policy in normalized_policies
         )
         if not counterbalance and len(normalized_policies) != 1:
@@ -271,6 +317,14 @@ def resolve_execution_surface(
             raise ValueError(
                 "instructed-only legacy runs do not support typed probe controls"
             )
+        if rollouts_per_family != 1:
+            raise ValueError(
+                "instructed-only legacy runs do not support repeated rollouts"
+            )
+        if paired_facts:
+            raise ValueError(
+                "instructed-only legacy runs do not support paired facts"
+            )
         # The legacy instructed runner has no policy/surface scheduler. Publish
         # only its effective one-execution contract, never the emergent cross.
         normalized_policies = (CounterpartPolicy.DEFAULT.value,)
@@ -282,7 +336,7 @@ def resolve_execution_surface(
         4 * len(normalized_policies) * len(selected_surfaces)
         if counterbalance
         else 1
-    )
+    ) * rollouts_per_family * (2 if paired_facts else 1)
 
     return ExecutionSurfacePlan(
         experiment_track=selected_track,
@@ -307,6 +361,13 @@ def resolve_execution_surface(
                 if mode == "both"
                 else "legacy_instructed_not_parameterized"
             )
+        ),
+        rollouts_per_family=rollouts_per_family,
+        paired_facts=paired_facts,
+        counterpart_policy_ids=tuple(
+            "absent" if policy == "absent"
+            else policy_spec_for(policy, policy_registry).policy_id
+            for policy in normalized_policies
         ),
     )
 
@@ -426,6 +487,7 @@ def resolve_config_execution_surface(config: object) -> ExecutionSurfacePlan:
 
 
 __all__ = [
+    "planned_executions",
     "ExecutionSurfacePlan",
     "PUBLIC_AGENT_MODULES",
     "PUBLIC_PARTICIPANTS",
@@ -434,3 +496,48 @@ __all__ = [
     "resolve_config_execution_surface",
     "resolve_execution_surface",
 ]
+
+
+def planned_executions(
+    plan: ExecutionSurfacePlan,
+    *,
+    scenarios: Sequence[str],
+    conditions: int | Sequence[Any],
+    families_per_scenario_condition: int,
+) -> dict[str, Any]:
+    """Physical executions a frozen plan implies for a concrete scenario list.
+
+    ``plan.executions_per_family`` includes the x2 for matched twins whenever
+    ``paired_facts`` is set, but only twin-capable scenarios actually run twins
+    (``supports_twin_generation``); the others run unpaired and stamp
+    ``paired_facts_effective=False``. This is the one place that reconciles the
+    two, so manifests, progress accounting, and cost estimates describe what
+    really runs instead of over-counting the unpaired scenarios by two.
+    """
+    from interpretability.scenarios.emergent_prompts import supports_twin_generation
+
+    if type(families_per_scenario_condition) is not int or families_per_scenario_condition < 0:
+        raise ValueError("families_per_scenario_condition must be a non-negative int")
+    n_conditions = conditions if isinstance(conditions, int) else len(conditions)
+    pair_factor = 2 if plan.paired_facts else 1
+    unpaired = plan.executions_per_family // pair_factor
+    per_scenario: dict[str, dict[str, Any]] = {}
+    total = 0
+    for scenario in scenarios:
+        effective = bool(plan.paired_facts and supports_twin_generation(str(scenario)))
+        per_family = unpaired * (2 if effective else 1)
+        count = per_family * n_conditions * families_per_scenario_condition
+        per_scenario[str(scenario)] = {
+            "executions_per_family": per_family,
+            "paired_facts_effective": effective,
+            "planned_executions": count,
+        }
+        total += count
+    return {
+        "per_scenario": per_scenario,
+        "total": total,
+        "unpaired_executions_per_family": unpaired,
+        "paired_executions_per_family": unpaired * 2 if plan.paired_facts else None,
+        "conditions": n_conditions,
+        "families_per_scenario_condition": families_per_scenario_condition,
+    }

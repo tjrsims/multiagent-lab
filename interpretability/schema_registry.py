@@ -37,6 +37,14 @@ from interpretability.scenarios.compiled import (
     COUNTERPART_KNOWLEDGE_GRANT_VERSION,
     EMERGENT_SCENARIO_SPEC_VERSION,
 )
+from interpretability.scenarios.turn_labels import TURN_LABEL_RULE_VERSION
+from interpretability.benchmark.manifest import (
+    BENCHMARK_MANIFEST_VERSION,
+    BENCHMARK_VERSION,
+)
+from interpretability.benchmark.pairs import PAIR_BUILDER_VERSION
+from interpretability.benchmark.scoring import SCORING_VERSION
+from interpretability.benchmark.views import VIEWS_VERSION
 from negotiation.domain.schema import SCHEMA_VERSION as NEGOTIATION_DOMAIN_VERSION
 from negotiation.game_master.adjudication import (
     ADJUDICATION_VERSION,
@@ -44,7 +52,7 @@ from negotiation.game_master.adjudication import (
 )
 
 
-SCHEMA_REGISTRY_VERSION = "2.2.0"
+SCHEMA_REGISTRY_VERSION = "2.4.0"
 
 
 def schema_registry() -> Dict[str, str]:
@@ -79,6 +87,12 @@ def schema_registry() -> Dict[str, str]:
         "probe_intervention": PROBE_INTERVENTION_SCHEMA_VERSION,
         "scripted_observation": SCRIPTED_OBSERVATION_SCHEMA_VERSION,
         "trial_runtime": TRIAL_RUNTIME_SCHEMA_VERSION,
+        "turn_label_rule": TURN_LABEL_RULE_VERSION,
+        "benchmark": BENCHMARK_VERSION,
+        "benchmark_manifest": BENCHMARK_MANIFEST_VERSION,
+        "benchmark_views": VIEWS_VERSION,
+        "benchmark_scoring": SCORING_VERSION,
+        "matched_pairs": PAIR_BUILDER_VERSION,
     }
 
 

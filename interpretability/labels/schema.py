@@ -1,4 +1,31 @@
-"""Canonical label records and explicit compatibility projection policy."""
+"""Canonical label records and explicit compatibility projection policy.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+A negotiation turn can be assessed by several independent sources (rule
+evaluator, GM, model judge, human). This module keeps every assessment as
+its own record and makes the collapse to "one scalar per turn" an explicit,
+versioned, auditable operation instead of a silent overwrite.
+1. `LabelValue` / `LabelStatus` / `LabelSource` / `BehaviorTarget` are the
+   enums: tri-state values (true/false/unknown), availability states,
+   sources, and the distinct constructs being assessed (factual deception,
+   omission, commitment violation, ... — never silently merged).
+2. `LabelRecord` is one immutable assessment with a content-derived
+   `label_id`; serialization demands the exact field set (no extras, no
+   omissions).
+3. `LabelSourcePolicy` is the versioned rule for combining sources: an
+   ordered preference over rule/GM/model-judge records, with fallback only
+   when explicitly allowed. Agent perception can never be a source for an
+   actual-behavior projection — that would conflate perceived with actual
+   deception.
+4. `project_label()` applies a policy to produce one `LabelProjection`
+   scalar per turn, recording which record won. Disagreement within the
+   chosen source yields CONFLICTED, and absence yields UNKNOWN — never a
+   coerced honest/deceptive value.
+Where this fits: the labels stage of the scenarios -> agents -> capture ->
+labels -> QC -> dataset -> probes/causal/benchmark pipeline; projections
+feed the scalar label arrays that probes train on.
+"""
 
 from __future__ import annotations
 

@@ -37,6 +37,29 @@ Usage:
 
     kept = filter_samples(samples, drop_probe_rounds=True)
     report = qc_report(samples)
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+QC asks one question: is this response a real negotiation decision, or a
+structural failure (leaked special tokens, repetition loops, third-person
+narration, echoed templates, too-short fragments)? Only clean accepted rows
+earn `sample_type == 'negotiation'` and become probe-training data.
+1. `KNOWN_FLAGS` lists every failure flag; `classify_response` computes them
+   from the response *text alone* — flags never look at deception labels, so
+   QC cannot bias the label distribution.
+2. `_has_repetition_loop` is the sliding-window repetition detector.
+3. `is_exact_protocol_execution` / `classify_sample_response` carve out one
+   principled exemption: promise_break and alliance_betrayal execution
+   turns require an exact typed token (COOPERATE, DEFECT, HONOR ALLIANCE,
+   BETRAY ALLIANCE). Those tokens are valid decisions, so they are exempt
+   from `too_short` — but only in the execution phase, and every other flag
+   still applies.
+4. `filter_samples` and `qc_report` run the filter over datasets (and can
+   drop probe rounds); `_sample_is_negotiation` shows how sample_type gates
+   what counts as trainable data.
+Where this fits: the QC stage of the scenarios -> agents -> capture ->
+labels -> QC -> dataset -> probes/causal/benchmark pipeline; probe training
+re-runs this filter and fails closed if it cannot.
 """
 
 from __future__ import annotations

@@ -1,4 +1,22 @@
-"""Explicit experiment tracks separated by model-state access assumptions."""
+"""Explicit experiment tracks separated by model-state access assumptions.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This file is the access-regime taxonomy: it names how much of the model's
+internal state an experiment is allowed to see, so text-only and white-box
+results are never pooled as if they were the same kind of evidence.
+1. `ExperimentTrack` enumerates the regimes: text_only (no activations),
+   single_agent_white_box / theory_of_mind (activations from one declared
+   actor), bilateral_white_box (both actors), adaptive (manifest-declared,
+   online adaptation allowed).
+2. `TrackSpec` + `get_track_spec()` state each track's activation access,
+   captured-actor count, and required agent modules — no fallback guessing.
+3. `validate_track_assignment()` rejects any participant/capture/module
+   combination inconsistent with the declared track.
+Where this fits: `launch.py` consults this when freezing the execution plan,
+and the track value is stamped into the run manifest and saved dataset so
+downstream probe/benchmark analyses know what access produced each row.
+"""
 
 from __future__ import annotations
 

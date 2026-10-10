@@ -8,6 +8,29 @@ References:
 - Abdulhai et al. (2024) "Evaluating & Reducing Deceptive Dialogue"
 - LIARS' BENCH (2025) - Deception type taxonomy
 - OpenDeception (2025) - Multi-turn deception benchmark
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This is the model-judge labeling route: G-Eval (DeepEval's rubric-scoring
+technique, here run on GPT-4o-mini) grades each negotiation response against
+written rubrics. It is an *external API dependency* — it needs an OpenAI
+key and network access — so callers must expect failure.
+1. `load_deepeval_environment()` is the explicit opt-in for dotenv
+   credential loading; importing the module never touches os.environ.
+2. `DeceptionCategory` names the four graded deception categories:
+   false_claims, strategic_omission, misleading_framing, and
+   commitment_violation.
+3. `DeceptionContext` packages what the judge sees — scenario type, the
+   agent's private ground-truth params, role, dialogue history — via
+   `to_prompt_context()`; without the private facts a judge could not tell
+   a bluff from the truth.
+4. `DeepEvalDetector` (below) runs the four rubric evaluations and returns
+   per-category scores plus confidence and reasoning. When setup or a call
+   fails, callers (GroundTruthDetector, InterpretabilityRunner) degrade to
+   the deterministic rule evaluator rather than dropping the trial.
+Where this fits: an optional judge inside the labels stage of the
+scenarios -> agents -> capture -> labels -> QC -> dataset ->
+probes/causal/benchmark pipeline.
 """
 
 import os

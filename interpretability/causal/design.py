@@ -1,4 +1,29 @@
-"""Frozen causal intervention designs defined before confirmatory execution."""
+"""Frozen causal intervention designs defined before confirmatory execution.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+Preregistration for interventions: the full design — what will be patched,
+ablated, steered, or clamped, with which controls, on which units, with
+which seed — is written down and content-hashed *before* execution, so it
+cannot quietly drift after seeing results.
+1. `InterventionKind` and `ControlKind` enumerate the allowed intervention
+   and control families (zero/sham hooks, norm-matched random directions,
+   shuffled labels, nuisance directions, positive controls).
+2. `canonical_vector_sha256` / `DirectionVectorIdentity` give each candidate
+   direction vector a tamper-evident identity: canonical little-endian
+   float64 bytes hashed with SHA-256 plus the dimension, so later execution
+   can prove it used exactly the preregistered vector.
+3. `CausalDesignManifest` is the frozen design record (layer, seed, scorer
+   version, declared controls, `independent_unit`, schema checksum). Its
+   validation rejects any row-level `independent_unit` ("row", "sample",
+   "turn", ...): turns within a trial are correlated, so treating them as
+   independent would fabricate statistical power. Units must be families,
+   dyads, trials, or other genuine clusters.
+Where this fits: the causal stage of the scenarios -> agents -> capture ->
+labels -> QC -> dataset -> probes/causal/benchmark pipeline;
+causal_validation.py validates its inputs against a locked manifest and
+causal/execution.py runs the declared controls.
+"""
 
 from __future__ import annotations
 

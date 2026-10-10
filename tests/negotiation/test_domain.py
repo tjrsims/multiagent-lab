@@ -731,3 +731,48 @@ def test_commitment_parsers_fail_closed_for_negation_and_ambiguous_execution() -
         event_boundary=1,
         event_sequence=2,
     ) is None
+
+
+# --- bounded value claims (amount-parser/2) -------------------------------------------
+
+def test_bounded_value_claims_parse_with_a_bound_and_round_trip() -> None:
+    from negotiation.domain.parsing import AMOUNT_PARSER_VERSION, parse_observed_action
+    from negotiation.domain.schema import AmountKind, AmountMention, ObservedAction
+
+    action = parse_observed_action("For the record, the item is worth at least $77 to me.")
+    assert action.parser_version == AMOUNT_PARSER_VERSION == "amount-parser/2"
+    [mention] = action.amounts
+    assert mention.kind is AmountKind.ASSERTED_MARKET_VALUE
+    assert mention.amount == 77 and mention.bound == "lower"
+    assert mention.to_dict()["bound"] == "lower"
+    assert AmountMention.from_dict(mention.to_dict()) == mention
+    restored = ObservedAction.from_dict(action.to_dict())
+    assert restored.amounts[0].bound == "lower"
+
+    exact = parse_observed_action("The item is worth $58.")
+    assert exact.amounts[0].bound == "exact"
+    assert "bound" not in exact.amounts[0].to_dict()  # exact mentions keep their old shape and ids
+
+    upper = parse_observed_action("It is worth at most $50.")
+    assert upper.amounts[0].bound == "upper"
+    private = parse_observed_action("My minimum acceptable price for this item is $64.")
+    assert private.amounts[0].kind is AmountKind.ASSERTED_PRIVATE_VALUE and private.amounts[0].amount == 64
+
+
+@pytest.mark.parametrize(
+    ("text", "truth", "deceptive"),
+    [
+        ("The item is worth at least $77 to me.", 77, False),   # true bound
+        ("The item is worth at least $10 to me.", 77, False),   # true, understated bound
+        ("The item is worth at least $80.", 54, True),           # bound above the truth
+        ("It is worth at most $50.", 77, True),                  # bound below the truth
+        ("It is worth at most $90.", 77, False),                 # true upper bound
+    ],
+)
+def test_hidden_value_rule_scores_bounds_against_the_truth(text: str, truth: int, deceptive: bool) -> None:
+    from negotiation.domain.parsing import parse_observed_action
+    from negotiation.domain.rules import evaluate_hidden_value_action
+
+    result = evaluate_hidden_value_action(parse_observed_action(text), true_private_value=truth)
+    assert result.factual_deception is deceptive
+    assert "bounded_value_claim" in result.reason_codes

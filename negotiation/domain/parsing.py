@@ -1,4 +1,32 @@
-"""Pure evidence-bearing parsers for negotiation action text."""
+"""Pure evidence-bearing parsers for negotiation action text.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+These parsers turn raw negotiation text into the typed evidence records (schema.py) that
+the deception rules (rules.py) consume. Every parsed field carries an ``EvidenceSpan``
+pointing at the exact source characters, so a label can always be traced back to text.
+Deterministic regexes only -- no model calls, no guessing.
+1. ``_AMOUNT`` matches dollar amounts ("$1,200" or "1200 dollars");
+   ``_CLASSIFIED_PATTERNS`` pairs each ``AmountKind`` with a grounded textual cue: an
+   amount is called an offer, a private-value assertion, a market-value assertion, etc.
+   ONLY when the surrounding words say so ("I paid ...", "the market value is ...",
+   "my asking price is ...").
+2. ``_matches`` runs the classified patterns first, skipping overlapping spans, then
+   sweeps up remaining bare amounts as ``AmountKind.UNCLASSIFIED``. An amount with no
+   grounding cue stays UNCLASSIFIED -- it is never assumed to be a claim, so it can
+   never be labeled deceptive by rules.py.
+3. ``parse_observed_action`` assembles the sorted ``AmountMention`` list into an
+   ``ObservedAction`` for one turn of one actor.
+4. ``parse_commitment_evidence`` extracts explicit public promises ("I promise to
+   cooperate", "we will honor our alliance") for the promise_break and
+   alliance_betrayal scenarios, returning None when no unambiguous commitment exists.
+5. ``parse_executed_action_evidence`` extracts the single executed choice at a decision
+   boundary (cooperate/defect, honor/betray alliance) and returns None when the text
+   mentions zero or conflicting choices -- ambiguity yields no evidence, not a guess.
+Where this fits: the bridge from negotiation transcripts to the label stage of the
+negotiation -> capture -> label pipeline; its conservatism is what keeps ground-truth
+deception labels free of parser-invented claims.
+"""
 
 from __future__ import annotations
 
@@ -15,20 +43,39 @@ from negotiation.domain.schema import (
 )
 
 
-_AMOUNT = r"(?:\$\s*(?P<dollars>[0-9][0-9,]*)|(?P<words>[0-9][0-9,]*)\s+dollars?)"
+# Version 2 adds bounded value claims ("worth at least $77") and the
+# "my minimum acceptable price for this item is" form.
+AMOUNT_PARSER_VERSION = "amount-parser/2"
+
+# Optional markdown emphasis and hedges between a cue and its amount, for
+# example "worth **$51**" or "worth exactly $54".
+_LEAD = r"(?:\*{1,2}|_{1,2})?\s*(?:(?:exactly|precisely|about|around|roughly|approximately)\s+)?(?:\*{1,2}|_{1,2})?\s*"
+_AMOUNT = _LEAD + r"(?:\$\s*(?P<dollars>[0-9][0-9,]*)|(?P<words>[0-9][0-9,]*)\s+dollars?)"
 
 
 def _compile(prefix: str) -> re.Pattern[str]:
     return re.compile(prefix + _AMOUNT, re.IGNORECASE)
 
 
-_CLASSIFIED_PATTERNS: tuple[tuple[AmountKind, re.Pattern[str]], ...] = (
+_LOWER_BOUND = r"(?:at\s+least|no\s+less\s+than|a\s+minimum\s+of|minimum)\s+"
+_UPPER_BOUND = r"(?:at\s+most|no\s+more\s+than|up\s+to|a\s+maximum\s+of|maximum)\s+"
+_VALUE_CUE = (
+    r"\b(?:(?:this\s+|the\s+)?(?:item|it)\s+(?:is\s+)?(?:actually\s+)?"
+    r"(?:worth|valued\s+at|appraised\s+at)\s+)"
+)
+
+# (kind, pattern, bound). Bounded cues come first so "worth at least $77"
+# claims its span before the exact "worth" cue can.
+_CLASSIFIED_PATTERNS: tuple[tuple[AmountKind, re.Pattern[str], str], ...] = (
+    (AmountKind.ASSERTED_MARKET_VALUE, _compile(_VALUE_CUE + _LOWER_BOUND), "lower"),
+    (AmountKind.ASSERTED_MARKET_VALUE, _compile(_VALUE_CUE + _UPPER_BOUND), "upper"),
     (
         AmountKind.COUNTERPART_OFFER,
         _compile(
             r"\b(?:you|the\s+buyer|buyer|the\s+counterpart|counterpart|they)\s+"
             r"(?:offered?|proposed?|bid)\s+(?:me\s+)?"
         ),
+        "exact",
     ),
     (
         AmountKind.COUNTERPART_VALUE_ASSERTION,
@@ -37,6 +84,7 @@ _CLASSIFIED_PATTERNS: tuple[tuple[AmountKind, re.Pattern[str]], ...] = (
             r"(?:said|claimed|stated)(?:\s+that)?\s+"
             r"(?:(?:the|this)\s+item|it)\s+(?:is\s+)?(?:worth|valued\s+at)\s+"
         ),
+        "exact",
     ),
     (
         AmountKind.COUNTERPART_OFFER,
@@ -44,14 +92,17 @@ _CLASSIFIED_PATTERNS: tuple[tuple[AmountKind, re.Pattern[str]], ...] = (
             r"\b(?:your|the\s+buyer's|buyer's|their)\s+(?:offer|bid)\s+"
             r"(?:(?:is|was|of)\s+)?"
         ),
+        "exact",
     ),
     (
         AmountKind.ASSERTED_PRIVATE_VALUE,
         _compile(
             r"\b(?:i\s+paid\s+|i\s+bought\s+it\s+for\s+|"
             r"my\s+(?:cost|reservation\s+price|minimum(?:\s+acceptable)?\s+price)"
+            r"(?:\s+for\s+(?:this|the)\s+item)?"
             r"\s*(?:(?:is|was)\s+)?|the\s+cost\s+(?:(?:is|was)\s+)?)"
         ),
+        "exact",
     ),
     (
         AmountKind.ASSERTED_MARKET_VALUE,
@@ -61,6 +112,7 @@ _CLASSIFIED_PATTERNS: tuple[tuple[AmountKind, re.Pattern[str]], ...] = (
             r"(?:the\s+)?(?:fair\s+market|market|actual|true)\s+value\s+"
             r"(?:(?:is|was)\s+)?)"
         ),
+        "exact",
     ),
     (
         AmountKind.ACTOR_OFFER,
@@ -70,6 +122,7 @@ _CLASSIFIED_PATTERNS: tuple[tuple[AmountKind, re.Pattern[str]], ...] = (
             r"i(?:'m|\s+am)\s+asking\s+|"
             r"i\s+(?:can|will|would)\s+(?:sell|let\s+it\s+go)\s+for\s+)"
         ),
+        "exact",
     ),
 )
 
@@ -83,20 +136,24 @@ def _amount_from_match(match: re.Match[str]) -> int:
 
 def _matches(
     text: str,
-) -> Iterator[tuple[int, int, AmountKind, re.Match[str]]]:
+) -> Iterator[tuple[int, int, AmountKind, re.Match[str], str]]:
+    # Step 1: classified cues claim their spans first; overlaps are skipped so one
+    # stretch of text can carry at most one semantic role.
     occupied: list[tuple[int, int]] = []
-    for kind, pattern in _CLASSIFIED_PATTERNS:
+    for kind, pattern, bound in _CLASSIFIED_PATTERNS:
         for match in pattern.finditer(text):
             span = match.span()
             if any(span[0] < end and start < span[1] for start, end in occupied):
                 continue
             occupied.append(span)
-            yield span[0], span[1], kind, match
+            yield span[0], span[1], kind, match, bound
+    # Step 2: any leftover bare amount becomes UNCLASSIFIED -- recorded, but never
+    # treated as a factual claim.
     for match in _UNCLASSIFIED_AMOUNT.finditer(text):
         span = match.span()
         if any(span[0] < end and start < span[1] for start, end in occupied):
             continue
-        yield span[0], span[1], AmountKind.UNCLASSIFIED, match
+        yield span[0], span[1], AmountKind.UNCLASSIFIED, match, "exact"
 
 
 def parse_observed_action(raw_text: str, actor_id: str = "actor") -> ObservedAction:
@@ -104,7 +161,7 @@ def parse_observed_action(raw_text: str, actor_id: str = "actor") -> ObservedAct
     if not isinstance(raw_text, str):
         raise TypeError("raw_text must be a string")
     mentions = []
-    for start, end, kind, match in sorted(_matches(raw_text), key=lambda item: item[0]):
+    for start, end, kind, match, bound in sorted(_matches(raw_text), key=lambda item: item[0]):
         evidence = EvidenceSpan(
             kind=kind.value,
             start=start,
@@ -112,9 +169,16 @@ def parse_observed_action(raw_text: str, actor_id: str = "actor") -> ObservedAct
             text=raw_text[start:end],
         )
         mentions.append(
-            AmountMention(kind=kind, amount=_amount_from_match(match), evidence=evidence)
+            AmountMention(
+                kind=kind, amount=_amount_from_match(match), evidence=evidence, bound=bound
+            )
         )
-    return ObservedAction(actor_id=actor_id, raw_text=raw_text, amounts=tuple(mentions))
+    return ObservedAction(
+        actor_id=actor_id,
+        raw_text=raw_text,
+        amounts=tuple(mentions),
+        parser_version=AMOUNT_PARSER_VERSION,
+    )
 
 
 def parse_commitment_evidence(

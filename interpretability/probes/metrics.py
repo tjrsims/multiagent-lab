@@ -1,4 +1,30 @@
-"""Leakage-safe nested grouped evaluation for headline probe results."""
+"""Leakage-safe nested grouped evaluation for headline probe results.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+`evaluate_nested_grouped_layers` is the scientific core of the probe
+results: it produces the headline held-out AUC while structurally preventing
+the two classic ways probes cheat — row-level leakage across the split and
+peeking at the test set during layer/hyperparameter selection.
+1. `resolve_manifest_row_groups` derives the split unit with union-find (a
+   disjoint-set merge): every row whose `trial_family_id` OR `dyad_id`
+   connects it to another row lands in the same connected component, and
+   components — never individual rows — are assigned to partitions.
+2. "Nested" selection: candidate layers and hyperparameters are compared
+   only on the development partition; the winner is refit on
+   train+development; the locked test partition is evaluated exactly once,
+   and that fact is recorded in provenance ("test_evaluations": 1).
+3. Scaler, PCA, and the logistic probe live inside one sklearn `Pipeline`,
+   so preprocessing is fitted only on the rows each stage may see.
+4. Labels must be explicitly binary 0/1 — unknown or severity values are
+   rejected rather than coerced. `_dataset_sha256` binds the result to the
+   exact activation/label arrays evaluated, and `NestedGroupedEvaluation`
+   carries metrics, selection table, provenance, and the fitted pipeline
+   (saved pickle-free via `probes/artifacts.py`).
+Where this fits: the probes stage of the scenarios -> agents -> capture ->
+labels -> QC -> dataset -> probes/causal/benchmark pipeline; train_probes.py
+calls this for every headline number.
+"""
 
 from __future__ import annotations
 

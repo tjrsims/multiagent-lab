@@ -26,6 +26,40 @@
 #       test_prompts=prompts,
 #   )
 
+"""Causal intervention suite: does the model actually USE the probed direction?
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+A probe proves a direction *correlates* with deception. The tests here ask
+the causal question by editing the residual stream and watching what changes.
+1. `filter_causal_samples` restricts to real negotiation turns (probe rounds
+   excluded) and builds trial-level groups for leakage-safe controls.
+2. `extract_deception_direction` / `create_steering_vector` derive the
+   candidate direction (deceptive-minus-honest activation difference).
+3. The interventions, each judged against matched random-direction controls
+   (a random vector of the same norm must NOT produce the same effect):
+   - `activation_patching_test` / `cross_sample_patching_test`: overwrite
+     activations with the direction added/removed or swapped from another
+     sample, and measure the change;
+   - `ablation_test`: project the direction out entirely;
+   - `steering_logit_sensitivity_test`: add the vector and read logit
+     shifts — explicitly labeled a *proxy*, not a behavioral claim;
+   - `steering_behavioral_test`: the real causal test — generate under a
+     magnitude sweep (dose-response), score outputs with a *versioned*
+     scorer (rule or provided scorer_fn; keyword heuristics are refused),
+     and demand rank-correlated dose-response plus a 2x margin over the
+     norm-matched random control;
+   - `probe_faithfulness_test` and `selectivity_test`: model-free checks
+     that the direction is used by the probe and specific to deception.
+4. `run_full_causal_validation` runs everything but deliberately refuses to
+   aggregate results into one causal verdict: it reports a descriptive pass
+   rate and instructs readers to interpret each estimand and control —
+   heterogeneous proxy tests are not a calibrated evidence hierarchy.
+Where this fits: the causal stage of the scenarios -> agents -> capture ->
+labels -> QC -> dataset -> probes/causal/benchmark pipeline, downstream of
+probe training and upstream of any causal claim in a writeup.
+"""
+
 import numpy as np
 from numpy.random import default_rng
 import torch
@@ -1357,16 +1391,16 @@ def steering_behavioral_test(
     # Lazy import to avoid a circular dep if causal_validation is imported at
     # package init time.
     try:
-        from interpretability.scenarios.emergent_prompts import compute_ground_truth
-    except ImportError:
-        compute_ground_truth = None
+        from interpretability.scenarios.turn_labels import compute_turn_label
+    except ImportError:  # pragma: no cover - the labeling contract ships with the package
+        compute_turn_label = None
 
     n_test = min(n_samples, len(test_prompts))
     has_custom_scorer = n_test > 0 and scorer_fn is not None
     has_rule_scorer = (
         n_test > 0
         and scenario is not None
-        and compute_ground_truth is not None
+        and compute_turn_label is not None
         and scenario_params_list is not None
         and len(scenario_params_list) >= n_test
     )
@@ -1395,14 +1429,24 @@ def steering_behavioral_test(
 
     scoring_method = "custom_scorer_fn" if has_custom_scorer else "scenario_rule"
 
-    def score(response: str, idx: int) -> bool:
-        """Return True if the generated response is deceptive."""
+    def score(response: str, idx: int) -> bool | None:
+        """Tri-state deception label for one generated response.
+
+        ``True``/``False`` only when the response carries a checkable claim
+        (rule v2); ``None`` when it does not. UNKNOWN responses are counted
+        separately and never enter the deception rate as honest, so steering
+        that merely suppresses claims cannot masquerade as reducing deception.
+        """
         if scorer_fn is not None:
-            return bool(scorer_fn(response, idx))
+            custom = scorer_fn(response, idx)
+            return None if custom is None else bool(custom)
         assert scenario is not None
-        assert compute_ground_truth is not None
         assert scenario_params_list is not None
-        return bool(compute_ground_truth(scenario, response, scenario_params_list[idx]))
+        from interpretability.scenarios.turn_labels import compute_turn_label
+
+        return compute_turn_label(
+            scenario, response, dict(scenario_params_list[idx])
+        ).is_deceptive
 
     hook_name = f"blocks.{steering_vector.layer}.hook_resid_post"
     model_dtype = next(model.parameters()).dtype
@@ -1425,6 +1469,7 @@ def steering_behavioral_test(
             n_ok = 0
             n_generated = 0
             n_scoring_failed = 0
+            n_unknown = 0
             completions: List[Dict[str, Any]] = []
             for i in range(n_test):
                 prompt = test_prompts[i]
@@ -1477,6 +1522,16 @@ def steering_behavioral_test(
                                 f"{scoring_error}"
                             )
                         continue
+                    if deceptive is None:
+                        n_unknown += 1
+                        completions.append({
+                            "prompt_index": i,
+                            "response": response,
+                            "score": None,
+                            "scoring_error": None,
+                            "label_status": "unknown",
+                        })
+                        continue
                     n_ok += 1
                     if deceptive:
                         n_deceptive += 1
@@ -1485,6 +1540,7 @@ def steering_behavioral_test(
                         "response": response,
                         "score": bool(deceptive),
                         "scoring_error": None,
+                        "label_status": "available",
                     })
                 except Exception as e:
                     if verbose:
@@ -1493,7 +1549,9 @@ def steering_behavioral_test(
             rate = (n_deceptive / n_ok) if n_ok > 0 else None
             by_mag[magnitude] = {
                 "deception_rate": rate,
+                "deception_rate_denominator": "responses with a checkable claim",
                 "n_deceptive": n_deceptive,
+                "n_unknown": n_unknown,
                 "n_ok": n_ok,
                 "n_generated": n_generated,
                 "n_scoring_failed": n_scoring_failed,

@@ -18,6 +18,46 @@ Usage:
     runner = InterpretabilityRunner(model_name="google/gemma-2-27b-it", device="cuda")
     results = runner.run_study(scenario='fishery', num_trials=10, use_gm=True)
     runner.save_dataset('negotiation_activations.json')
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+MAP OF THIS FILE — the major pieces, in the order they appear:
+1. `EvaluationResult` — a small dataclass bundling behavioral metrics
+   (cooperation, payoff, agreements) with the captured `ActivationSample` rows.
+2. `TransformerLensWrapper` — a Concordia model adapter around a TransformerLens
+   `HookedTransformer`. After sampling a response it replays the exact generated
+   token IDs in one deterministic forward pass (`CaptureMode.TEACHER_FORCED_REPLAY`;
+   "teacher forcing" means feeding the model its own already-chosen tokens instead
+   of sampling anew) and records the residual stream — the running vector each
+   transformer layer reads and writes, hook name `hook_resid_post` — at the chosen
+   layers, at the last retained response token. `_publish_scoped_generation` binds
+   those activations to the generation record via content hashes, so text and
+   activations provably came from the same acting-model call.
+3. `HybridLanguageModel` — the fast path: HuggingFace `generate` (KV-cached, roughly
+   20x faster) for text, plus a TransformerLens copy of the SAME checkpoint used only
+   for the teacher-forced capture replay; can also extract Gemma Scope SAE features
+   (a sparse autoencoder that decomposes activations into interpretable directions).
+4. `HuggingFaceTextModel` — text-only adapter that never constructs TransformerLens;
+   every generation record is forced to `capture_mode='none'`.
+5. `FastModelWrapper` — wraps a base model and disables capture/steering for agents
+   whose internals we do not study (e.g., the counterpart), purely for speed.
+6. `InterpretabilityRunner` — the orchestrator: builds the potential deceiver and
+   counterpart, runs rounds, and extracts agent labels (perceived_deception) plus
+   GM ground-truth labels (actual_deception). `evaluator_type` selects 'deepeval'
+   (a GPT-4o-mini judge) or 'rule'; deepeval setup or per-call failure automatically
+   falls back to the rule evaluator, and a failed label extraction yields *unknown*
+   labels, never "honest" (see `_apply_ground_truth_rules`).
+7. Trial runtimes — two coexist: `run_transactional_emergent_trial` delegates to the
+   canonical transactional executor in `runtime/runner.py` (headline runs pin this
+   path), while `_run_emergent_trial` is the older inline legacy path retained for
+   compatibility. `run_emergent_study` drives whole counterbalanced studies and
+   chooses between them.
+8. `save_dataset` hands all samples/records to `core/dataset_builder.DatasetBuilder`
+   for safe JSON+NPZ export; legacy pickle output requires an explicit opt-in.
+Where this fits: this file is the agents -> capture -> labels middle of the
+scenarios -> agents -> capture -> labels -> QC -> dataset -> probes/causal/benchmark
+pipeline; `scenarios/` feeds it, and the dataset builder, probes, causal suite, and
+benchmark views consume what it saves.
 """
 
 import os
@@ -56,13 +96,16 @@ from interpretability.runtime.runner import (
     CounterbalanceAssignment,
     EmergentTrialExecutor,
     build_counterbalance_schedule,
+    expand_rollouts,
 )
+from interpretability.scenarios.policy_registry import CounterpartPolicyRegistry
+from interpretability.labels.tracks import LabelTrackRegistry
 from interpretability.scenarios.compiled import (
     SUPPORTED_COUNTERPART_POLICIES,
     SUPPORTED_SURFACE_VARIANTS,
     CounterpartPolicy,
     ExecutionProtocol,
-    evaluate_actor_response,
+    compute_instance_turn_label,
     validate_counterpart_policy,
     validate_execution_protocol,
 )
@@ -235,8 +278,14 @@ def _build_runtime_intervention_design(
     max_rounds: int,
     run_probes: bool,
     scripted_injections: Optional[Dict[int, str]],
+    closing_attestation: bool = False,
+    attestation_timing: str = 'closing',
 ) -> Optional[InterventionDesign]:
-    """Compile compatibility controls into one typed intervention design."""
+    """Compile compatibility controls into one typed intervention design.
+
+    ``closing_attestation`` adds the registered closing observation before the
+    actor's final turn (see ``interpretability.runtime.attestation``).
+    """
     if first_mover not in {'actor', 'counterpart'}:
         raise ValueError('first_mover must be actor or counterpart')
     first_mover_id = roles[first_mover]
@@ -298,6 +347,16 @@ def _build_runtime_intervention_design(
             source='legacy-scripted-injection/v1',
             content=content,
         ))
+    if closing_attestation:
+        from interpretability.runtime.attestation import closing_attestation_design
+        specs.extend(closing_attestation_design(
+            actor_id=actor_id,
+            max_rounds=max_rounds,
+            actor_moves_first=(actor_offset == 0),
+            sequence=200,
+            scenario=scenario,
+            timing=attestation_timing,
+        ).specs)
     return InterventionDesign(specs=tuple(specs)) if specs else None
 
 
@@ -552,7 +611,7 @@ try:
         get_counterpart_prompt,
         get_counterpart_prompt_with_behavior,
         generate_scenario_params,
-        compute_ground_truth,
+        compute_turn_label,
         get_all_scenarios as get_emergent_scenarios,
         get_verification_prompt,
         get_belief_shift_injection,
@@ -598,6 +657,9 @@ except ImportError as e:
     print(f"Warning: probe training modules not available: {e}")
 
 
+# Orientation: the run-level summary object. Behavioral outcomes and the list of
+# per-turn ActivationSample rows travel together so downstream analysis never has
+# to re-join metrics with activations.
 @dataclass
 class EvaluationResult:
     """Combined evaluation + interpretability results."""
@@ -620,6 +682,10 @@ class EvaluationResult:
     gm_modules_used: List[str] = field(default_factory=list)
 
 
+# Orientation: pure-TransformerLens adapter. Slower than the hybrid below, but a
+# single library does both generation and capture. Capture is a deterministic
+# teacher-forced replay of the exact generated token IDs, recording hook_resid_post
+# (the residual stream) at the last retained response token per chosen layer.
 class TransformerLensWrapper(language_model.LanguageModel):
     """TransformerLens model that captures activations on every call."""
 
@@ -1017,6 +1083,10 @@ class TransformerLensWrapper(language_model.LanguageModel):
         return self._call_count
 
 
+# Orientation: the workhorse adapter for real runs. HuggingFace generates the text
+# quickly; a TransformerLens copy of the same checkpoint then replays those exact
+# tokens once (teacher-forced) to capture activations, so speed never changes what
+# gets measured.
 class HybridLanguageModel(language_model.LanguageModel):
     """Fast hybrid model: HuggingFace generation + TransformerLens activation capture + Gemma Scope SAE.
 
@@ -1469,6 +1539,9 @@ class HybridLanguageModel(language_model.LanguageModel):
             return {}
 
 
+# Orientation: the text-only track's adapter. Inherits the audited HF generation
+# path but structurally cannot capture: no TransformerLens is ever built and every
+# generation record is stamped capture_mode='none'.
 class HuggingFaceTextModel(HybridLanguageModel):
     """HuggingFace-only generator that publishes text evidence without capture.
 
@@ -1533,6 +1606,9 @@ class HuggingFaceTextModel(HybridLanguageModel):
         return 0
 
 
+# Orientation: a thin speed wrapper. Agents we do not analyze (typically the
+# counterpart) share the same underlying model but skip the expensive capture
+# replay and any steering hooks.
 class FastModelWrapper(language_model.LanguageModel):
     """Wrapper that skips activation capture for non-essential calls (e.g., counterpart).
 
@@ -1565,6 +1641,10 @@ class FastModelWrapper(language_model.LanguageModel):
         return self._base.call_count
 
 
+# Orientation: the orchestrator that everything above serves. It owns agents,
+# trial execution (legacy inline vs. canonical transactional via runtime/runner.py),
+# label extraction with deepeval->rule fallback, and dataset export. Failed label
+# extraction is recorded as unknown — absence of evidence is never "honest".
 class InterpretabilityRunner:
     """Runs evaluation while collecting interpretability data with optional GM ground truth."""
 
@@ -1588,7 +1668,14 @@ class InterpretabilityRunner:
             ExperimentTrack.SINGLE_AGENT_WHITE_BOX
         ),
         captured_actor_ids: Optional[Sequence[str]] = None,
+        model: Optional[Any] = None,
     ):
+        """``model`` injects a ready acting model (e.g. an API adapter).
+
+        Injection is accepted only on the ``text_only`` track: an injected
+        model cannot prove it captured activations from the acting call, so
+        white-box tracks always construct one of the capturing wrappers.
+        """
         self.experiment_track = ExperimentTrack(experiment_track)
         if captured_actor_ids is None:
             if self.experiment_track is ExperimentTrack.TEXT_ONLY:
@@ -1620,7 +1707,18 @@ class InterpretabilityRunner:
         # Choose the implementation from the declared access regime. Text-only
         # must not import or construct TransformerLens, even if a caller passes
         # a stale hybrid flag.
-        if self.experiment_track is ExperimentTrack.TEXT_ONLY:
+        if model is not None:
+            if self.experiment_track is not ExperimentTrack.TEXT_ONLY:
+                raise ValueError(
+                    'an injected acting model is supported only on the '
+                    'text_only track; white-box tracks must construct a '
+                    'capturing wrapper'
+                )
+            for method in ('sample_text', 'sample_choice'):
+                if not callable(getattr(model, method, None)):
+                    raise TypeError(f'injected model must implement {method}()')
+            self.model = model
+        elif self.experiment_track is ExperimentTrack.TEXT_ONLY:
             self.model = HuggingFaceTextModel(
                 model_name=model_name,
                 device=device,
@@ -1654,6 +1752,8 @@ class InterpretabilityRunner:
             use_sae and self.experiment_track is not ExperimentTrack.TEXT_ONLY
         )
         self.activation_samples: List[ActivationSample] = []
+        # Text-only tracks: primary-actor rows without activations.
+        self.text_samples: List[ActivationSample] = []
         self.generation_records: List[GenerationRecord] = []
         self.label_records: List[Any] = []
         self.interaction_events: List[Dict[str, Any]] = []
@@ -2325,8 +2425,21 @@ Example: yes, yes'''
         # It is a compatibility fallback until this caller is fully migrated
         # to ``EmergentTrialExecutor`` and LabelRecord projections.
         try:
-            from .scenarios.emergent_prompts import compute_ground_truth as regex_ground_truth
-            is_deceptive = regex_ground_truth(scenario, response, params)
+            from .scenarios.emergent_prompts import compute_turn_label as regex_turn_label
+            turn_label = regex_turn_label(scenario, response, params)
+            is_deceptive = turn_label.is_deceptive
+            if is_deceptive is None:
+                # No checkable claim (or the private fact is unavailable):
+                # the label stays unavailable rather than defaulting to honest.
+                return {
+                    **result,
+                    'evaluation_succeeded': False,
+                    'evaluation_method': 'structured_raw_response_rule',
+                    'evaluation_error': (
+                        f"{result.get('evaluation_error', 'legacy evaluation unavailable')}; "
+                        f"raw-response rule: {'; '.join(turn_label.reason_codes)}"
+                    ),
+                }
             return {
                 'actual_deception': 1.0 if is_deceptive else 0.0,
                 'manipulation_score': 0.5 if is_deceptive else 0.0,
@@ -2941,6 +3054,12 @@ Example: yes, yes'''
         scripted_injections: Dict[int, str] = None,
         protocol: ExecutionProtocol | str = ExecutionProtocol.ALTERNATING,
         run_probes: Optional[bool] = None,
+        rollouts_per_family: int = 1,
+        paired_facts: bool = False,
+        policy_registry: Optional['CounterpartPolicyRegistry'] = None,
+        label_tracks: Optional['LabelTrackRegistry'] = None,
+        closing_attestation: bool = False,
+        attestation_timing: str = 'closing',
     ) -> Dict[str, Any]:
         """Run emergent deception study with real Concordia agents.
 
@@ -2985,6 +3104,10 @@ Example: yes, yes'''
             raise ImportError("emergent_prompts.py not found in evaluation/scenarios/")
         if type(num_trials) is not int or num_trials <= 0:
             raise ValueError('num_trials must be a positive integer')
+        if type(rollouts_per_family) is not int or rollouts_per_family < 1:
+            raise ValueError('rollouts_per_family must be a positive integer')
+        if type(paired_facts) is not bool:
+            raise TypeError('paired_facts must be a boolean')
 
         if agent_modules is None:
             agent_modules = [] if ultrafast else ['theory_of_mind']
@@ -3045,9 +3168,12 @@ Example: yes, yes'''
         legacy_policy_by_value = {
             policy.value: policy for policy in CounterpartType
         }
-        unknown_policies = set(requested_policies).difference(
-            legacy_policy_by_value
-        )
+        # Module policies are known only through the run's registry; the
+        # legacy runtime cannot render them and rejects them below.
+        known_policies = set(legacy_policy_by_value)
+        if policy_registry is not None:
+            known_policies |= set(policy_registry.names())
+        unknown_policies = set(requested_policies).difference(known_policies)
         if unknown_policies:
             raise ValueError(
                 'Unknown counterpart policies: '
@@ -3121,7 +3247,7 @@ Example: yes, yes'''
                 ),)
             else:
                 normalized_policies = tuple(
-                    validate_counterpart_policy(policy)
+                    validate_counterpart_policy(policy, policy_registry)
                     for policy in requested_policies
                 )
             if (
@@ -3133,6 +3259,7 @@ Example: yes, yes'''
                     counterpart_types=normalized_policies,
                     surface_variants=selected_surfaces,
                     schedule_seed=counterbalance_seed,
+                    policy_registry=policy_registry,
                 )
                 _validate_complete_counterbalance_schedule(
                     counterbalance_schedule,
@@ -3185,9 +3312,20 @@ Example: yes, yes'''
                     | scheduled_actor_ids
                 ))
             )
+        if use_legacy_runtime and rollouts_per_family != 1:
+            raise ValueError(
+                'repeated rollouts require the transactional runtime'
+            )
+        if use_legacy_runtime and paired_facts:
+            raise ValueError('paired facts require the transactional runtime')
+        from .scenarios.emergent_prompts import supports_twin_generation
+        twins_supported = supports_twin_generation(scenario)
+        pair_roles: tuple[Optional[str], ...] = (
+            ('above', 'below') if paired_facts and twins_supported else (None,)
+        )
         assignments_per_family = (
             len(counterbalance_schedule) if not use_legacy_runtime else 1
-        )
+        ) * rollouts_per_family * len(pair_roles)
         family_seed_start = int(getattr(
             self,
             '_trial_id',
@@ -3229,6 +3367,10 @@ Example: yes, yes'''
             'num_trials_semantics': 'semantic_families_per_condition',
             'family_seed_start': family_seed_start,
             'executions_per_family': assignments_per_family,
+            'rollouts_per_family': rollouts_per_family,
+            'paired_facts': paired_facts,
+            'paired_facts_effective': bool(paired_facts and twins_supported),
+            'pair_roles': [role for role in pair_roles],
             'executions_per_condition': executions_per_condition,
             'total_planned_executions': total_planned_executions,
             'total_executions': 0,
@@ -3293,8 +3435,14 @@ Example: yes, yes'''
             for family_index in range(num_trials):
                 family_seed = family_seed_start + family_index
                 family_results = []
-                for assignment_index, assignment in enumerate(
-                    family_assignments
+                for assignment_index, (
+                    assignment, rollout_index, pair_role
+                ) in enumerate(
+                    expand_rollouts(
+                        family_assignments,
+                        rollouts_per_family,
+                        pair_roles=pair_roles,
+                    )
                 ):
                     execution_number = completed_executions + 1
                     print(
@@ -3307,6 +3455,7 @@ Example: yes, yes'''
                         flush=True,
                     )
                     n_before = len(self.activation_samples)
+                    text_before = len(self.text_samples)
                     trial_seed_before = getattr(self, '_trial_id', None)
                     trial_kwargs: Dict[str, Any] = {
                         'scenario': scenario,
@@ -3324,6 +3473,10 @@ Example: yes, yes'''
                         policy_label = requested_policies[
                             family_index % len(requested_policies)
                         ]
+                        if policy_label not in legacy_policy_by_value:
+                            raise ValueError(
+                                f'the legacy runtime cannot run module policy {policy_label!r}'
+                            )
                         trial_kwargs['counterpart_type'] = (
                             legacy_policy_by_value[policy_label]
                         )
@@ -3359,9 +3512,14 @@ Example: yes, yes'''
                                 )
                             ),
                             'protocol': execution_protocol,
+                            'pair_role': pair_role,
                         })
                         trial_result = self.run_transactional_emergent_trial(
-                            **trial_kwargs
+                            **trial_kwargs,
+                            policy_registry=policy_registry,
+                            label_tracks=label_tracks,
+                            closing_attestation=closing_attestation,
+                            attestation_timing=attestation_timing,
                         )
                         trial_result['runtime_path'] = 'transactional'
                     if not isinstance(trial_result, dict):
@@ -3369,6 +3527,17 @@ Example: yes, yes'''
                     trial_result['family_seed'] = family_seed
                     trial_result['semantic_family_index'] = family_index
                     trial_result['counterbalance_position'] = assignment_index
+                    # ``None`` when the run did not request rollouts
+                    # (ActivationSample.rollout_index contract).
+                    stamped_rollout = (
+                        rollout_index if rollouts_per_family > 1 else None
+                    )
+                    trial_result['rollout_index'] = stamped_rollout
+                    trial_result['pair_role'] = pair_role
+                    for new_sample in self.activation_samples[n_before:]:
+                        new_sample.rollout_index = stamped_rollout
+                    for new_sample in self.text_samples[text_before:]:
+                        new_sample.rollout_index = stamped_rollout
                     trial_seed_after = getattr(self, '_trial_id', None)
                     if (
                         type(trial_seed_after) is int
@@ -3581,6 +3750,11 @@ Example: yes, yes'''
         protocol: ExecutionProtocol | str = ExecutionProtocol.ALTERNATING,
         run_probes: bool = False,
         intervention_design: Optional[InterventionDesign] = None,
+        pair_role: Optional[str] = None,
+        policy_registry: Optional['CounterpartPolicyRegistry'] = None,
+        label_tracks: Optional['LabelTrackRegistry'] = None,
+        closing_attestation: bool = False,
+        attestation_timing: str = 'closing',
     ) -> Dict[str, Any]:
         """Run one emergent trial through the canonical transactional runtime.
 
@@ -3618,7 +3792,7 @@ Example: yes, yes'''
                     "counterpart_type='absent' requires "
                     "protocol='solo_no_response'"
                 )
-            counterpart_policy = validate_counterpart_policy(ct_label)
+            counterpart_policy = validate_counterpart_policy(ct_label, policy_registry)
         normalized_condition = self._normalize_incentive_condition(condition)
         self._allocate_trial_id()
         actor_profile = (
@@ -3647,6 +3821,8 @@ Example: yes, yes'''
                 max_rounds=max_rounds,
                 run_probes=run_probes,
                 scripted_injections=scripted_injections,
+                closing_attestation=closing_attestation,
+                attestation_timing=attestation_timing,
             )
         if (
             execution_protocol is ExecutionProtocol.SOLO_NO_RESPONSE
@@ -3728,12 +3904,23 @@ Example: yes, yes'''
                 'info_withholding', 'promise_break', 'alliance_betrayal'
             }:
                 return None
-            return evaluate_actor_response(
+            label = compute_instance_turn_label(
                 instance,
                 resolution.event.action.raw_text,
+                actor_role_id=resolution.event.action.actor_id,
+                round_index=resolution.event.round_index,
             )
+            return label.evaluator_result()
 
         def evaluate_model(instance, resolution, _events):
+            if (
+                getattr(self, 'evaluator_model', None) is None
+                and getattr(self, '_deepeval_detector', None) is None
+            ):
+                # No judge is configured: the MODEL_JUDGE channel must stay
+                # unknown rather than fall back to the legacy regex, which
+                # would label no-claim turns "honest" through the back door.
+                return None
             params = dict(instance.rule_config['semantic_params'])
             evaluated = self._detect_deception_with_llm(
                 instance.scenario,
@@ -3766,6 +3953,8 @@ Example: yes, yes'''
             model_evaluator=evaluate_model,
             max_retries_per_turn=max_retries_per_turn,
             experiment_track=self.experiment_track,
+            policy_registry=policy_registry,
+            label_tracks=label_tracks,
         )
         execution = executor.run(
             scenario=scenario,
@@ -3783,6 +3972,7 @@ Example: yes, yes'''
             captured_actor_ids=per_trial_capture_ids,
             intervention_design=intervention_design,
             protocol=execution_protocol,
+            pair_role=pair_role,
         )
         self.generation_records.extend(execution.generation_records)
         self.label_records.extend(execution.label_records)
@@ -3806,9 +3996,12 @@ Example: yes, yes'''
                 self.intervention_application_logs = []
             self.intervention_application_logs.append(execution_log)
         self.activation_samples.extend(execution.activation_samples)
+        text_rows = tuple(getattr(execution, 'text_samples', ()))
+        if text_rows:
+            self.text_samples.extend(text_rows)
         projected = [
             sample.actual_deception
-            for sample in execution.activation_samples
+            for sample in (execution.activation_samples or text_rows)
             if sample.sample_type == 'negotiation'
             and sample.actual_deception is not None
         ]
@@ -4088,9 +4281,18 @@ Example: yes, yes'''
                 # cumulative transcript label would mark later honest turns as
                 # deceptive after any earlier event and misalign activation and
                 # target. Trial-level detection is accumulated separately.
-                is_deceptive = bool(compute_ground_truth(
-                    scenario, response, params
-                ))
+                turn_label = compute_turn_label(
+                    scenario,
+                    response,
+                    params,
+                    actor_id="Negotiator",
+                    recipient_ids=("Counterpart",),
+                    round_index=round_num,
+                    trial_id=self._trial_id,
+                )
+                # Tri-state: UNKNOWN (no claim / uncertain / fact missing) stays
+                # None and is never coerced to honest.
+                is_deceptive = turn_label.is_deceptive
                 if is_deceptive:
                     deception_detected = True
 
@@ -4100,10 +4302,14 @@ Example: yes, yes'''
                 gt_llm_rules_val = gm_labels['actual_deception']  # Already computed above
                 gt_deepeval_val = None
                 try:
-                    from .scenarios.emergent_prompts import compute_ground_truth as regex_gt
-                    gt_regex_val = 1.0 if regex_gt(
-                        scenario, response, params
-                    ) else 0.0
+                    from .scenarios.emergent_prompts import compute_turn_label as regex_turn_label
+                    regex_label = regex_turn_label(scenario, response, params).is_deceptive
+                    # Tri-state: UNKNOWN (no claim / uncertain / fact missing)
+                    # stays None here too; it is never recorded as honest.
+                    gt_regex_val = (
+                        None if regex_label is None
+                        else (1.0 if regex_label else 0.0)
+                    )
                 except Exception:
                     pass
                 try:
@@ -4167,6 +4373,16 @@ Example: yes, yes'''
                     incentive_condition=condition.value,
                     scenario_params=params.copy(),
                     emergent_ground_truth=is_deceptive,
+                    claim_status=turn_label.claim_status.value,
+                    behavior_subtype=turn_label.behavior_subtype.value,
+                    label_reason_codes=list(turn_label.reason_codes),
+                    rule_version=turn_label.rule_version,
+                    label_source=(
+                        'rule' if is_deceptive is not None else None
+                    ),
+                    claim_values=list(turn_label.claim_values),
+                    offer_values=list(turn_label.offer_values),
+                    runtime_path='legacy_compatibility',
                     # SAE FEATURES (if available)
                     sae_features=sae_result.feature_activations if sae_result else None,
                     sae_top_features=sae_result.top_features if sae_result else None,
@@ -4319,6 +4535,12 @@ Example: yes, yes'''
         counterbalance_seed: int = 0,
         surface_variants: Sequence[str] | None = None,
         run_probes: Optional[bool] = None,
+        rollouts_per_family: int = 1,
+        paired_facts: bool = False,
+        policy_registry: Optional['CounterpartPolicyRegistry'] = None,
+        label_tracks: Optional['LabelTrackRegistry'] = None,
+        closing_attestation: bool = False,
+        attestation_timing: str = 'closing',
     ) -> Dict[str, Any]:
         """Run emergent study across all 6 scenarios.
 
@@ -4400,6 +4622,12 @@ Example: yes, yes'''
                 counterbalance_seed=counterbalance_seed,
                 surface_variants=surface_variants,
                 run_probes=run_probes,
+                rollouts_per_family=rollouts_per_family,
+                paired_facts=paired_facts,
+                policy_registry=policy_registry,
+                label_tracks=label_tracks,
+                closing_attestation=closing_attestation,
+                attestation_timing=attestation_timing,
             )
             all_results[scenario] = results
 
@@ -4666,7 +4894,15 @@ Example: yes, yes'''
                     main_agent.observe(f"Counterpart: {cp_response}")
                     counterpart.observe(f"Negotiator: {response}")
 
-                gt = compute_ground_truth(scenario, last_response or "", params)
+                stability_label = compute_turn_label(
+                    scenario,
+                    last_response or "",
+                    params,
+                    actor_id="Negotiator",
+                    recipient_ids=("Counterpart",),
+                    trial_id=self._trial_id,
+                )
+                gt = stability_label.is_deceptive
 
                 # Create sample with framing_variant tag
                 sample = ActivationSample(
@@ -4691,6 +4927,14 @@ Example: yes, yes'''
                     incentive_condition=condition_enum.value,
                     scenario_params=params.copy(),
                     emergent_ground_truth=gt,
+                    claim_status=stability_label.claim_status.value,
+                    behavior_subtype=stability_label.behavior_subtype.value,
+                    label_reason_codes=list(stability_label.reason_codes),
+                    rule_version=stability_label.rule_version,
+                    label_source=('rule' if gt is not None else None),
+                    claim_values=list(stability_label.claim_values),
+                    offer_values=list(stability_label.offer_values),
+                    runtime_path='legacy_compatibility',
                     experiment_mode="emergent",
                     framing_variant=framing,
                     dialogue_history=dialogue_so_far,
@@ -4708,7 +4952,9 @@ Example: yes, yes'''
                     first_layer = list(last_activations.keys())[0]
                     framing_results[framing]['activations'].append(last_activations[first_layer])
 
-                label = "DECEPTION" if gt else "honest"
+                label = (
+                    "UNKNOWN" if gt is None else "DECEPTION" if gt else "honest"
+                )
                 print(label, flush=True)
 
         # Compute cross-framing activation similarity
@@ -5324,10 +5570,19 @@ Example: yes, yes'''
         from interpretability.core.dataset_builder import DatasetBuilder
 
         if not self.activation_samples:
+            n_text = len(self.text_samples)
             raise ValueError(
-                'Cannot save an activation dataset with zero activation rows; '
-                'text-only runs should retain their generation records and '
-                'transcript as recovery/evidence artifacts instead.'
+                'Cannot save an activation dataset with zero activation rows'
+                + (
+                    f'; this text-only run holds {n_text} text rows that '
+                    'activation_dataset/4.1.0 cannot carry. Persist them as an '
+                    'end_bench_text_dataset via end_bench.run.run_text_track '
+                    '(`end-bench run-text`), or retain the generation records '
+                    'and transcript as recovery/evidence artifacts.'
+                    if n_text else
+                    '; text-only runs should retain their generation records '
+                    'and transcript as recovery/evidence artifacts instead.'
+                )
             )
         model = getattr(self, 'model', None)
         model_name = str(getattr(model, 'model_name', 'unknown'))

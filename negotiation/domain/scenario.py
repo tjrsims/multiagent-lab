@@ -1,4 +1,28 @@
-"""Immutable compiled scenario and explicit role-view contracts."""
+"""Immutable compiled scenario and explicit role-view contracts.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+A compiled scenario is the frozen "world setup" for one negotiation trial: what everyone
+can see, what each role privately knows, and which actions are legal. This is where
+private facts live -- the information asymmetry that makes emergent deception possible.
+1. ``RoleView`` is one role's window on the world: a shared ``public_state`` plus that
+   role's ``private_state`` (both recursively frozen via ``freeze_mapping``). Prompts
+   for a role must be built only from its own view; the counterpart never sees another
+   role's private_state.
+2. ``ScenarioInstance`` is the deterministic, content-hashed record binding scenario
+   name, seed, trial IDs (``trial_id`` plus ``trial_family_id`` for leakage-safe
+   grouping in splits), public state, all role views, the legal action names, and the
+   ``rule_config`` the deception rules will use. ``__post_init__`` enforces invariants:
+   supported ``SCHEMA_VERSION`` only, unique role IDs, and every role view sharing the
+   exact same public state -- so public/private cannot silently diverge.
+3. ``instance_id`` is a ``stable_id`` content hash; ``from_dict`` demands the exact
+   field set (``_require_exact_fields``) and re-verifies the hash, so a persisted
+   scenario cannot be edited without detection. ``view_for`` fetches one role's view.
+Because the same frozen instance feeds prompts, rule evaluation, and metadata, the
+parameters agents saw are provably the parameters labels were computed from.
+Where this fits: the input to the negotiation stage and the reference truth for the
+label stage of the negotiation -> capture -> label pipeline.
+"""
 
 from __future__ import annotations
 

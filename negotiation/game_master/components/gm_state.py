@@ -12,7 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Negotiation state tracking component for game master."""
+"""Negotiation state tracking component for game master.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This is the OFFICIAL game state: which offers exist, whose turn/round it is, what was
+agreed, and how each negotiation ended. Agents keep their own fallible notes elsewhere
+(components/negotiation_memory.py); this record is what the referee trusts. It is pure
+Python bookkeeping -- no model calls.
+1. ``NegotiationOffer`` and ``NegotiationState`` are the records: offers carry
+   offerer/recipient/terms/round plus accepted/rejected flags; a negotiation carries
+   participants, phase ('opening' -> 'bargaining' -> 'closing' -> 'completed'/'failed'),
+   round counter, offer history, agreements, active offer, deadline, and termination
+   reason.
+2. ``NegotiationStateTracker`` mutates that state ONLY through methods that enforce
+   legality on every call: ``start_negotiation`` (unique ID, two-plus unique parties),
+   ``record_offer`` (live negotiation, both parties are participants, no self-offers),
+   ``accept_offer``/``reject_offer`` (offer belongs to this negotiation, only the
+   intended recipient may act, no double accept/reject or flip after the fact),
+   ``advance_round`` (auto-terminates at max_rounds), and ``terminate_negotiation``.
+   Illegal transitions raise instead of being recorded.
+3. It also keeps a light relationship score per participant pair (nudged up on accept,
+   down on reject) and win/fail statistics.
+4. As a Concordia component, ``pre_act`` renders a status summary into the game master's
+   prompt; ``update`` enforces deadlines; ``get_state``/``set_state`` serialize
+   everything (timestamps as ISO strings, active offer as a history index) for the
+   adjudicator's checkpoints.
+Where this fits: negotiation stage of the negotiation -> capture -> label pipeline; the
+adjudicator drives this tracker, and its offer/agreement record is part of the trusted
+factual basis for ground-truth deception labels.
+"""
 
 import dataclasses
 import datetime

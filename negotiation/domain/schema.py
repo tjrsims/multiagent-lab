@@ -1,4 +1,35 @@
-"""Versioned immutable values used at the negotiation domain boundary."""
+"""Versioned immutable values used at the negotiation domain boundary.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+Every record that crosses the negotiation domain boundary is defined here as a frozen
+(immutable) dataclass with a content-hash identity, so audit logs built from these
+records are tamper-evident.
+1. Foundations: ``freeze_mapping``/``_freeze_json`` make recursively read-only,
+   JSON-compatible copies; ``thaw_json`` converts back for serialization; ``stable_id``
+   hashes a record's canonical JSON (sorted keys, no NaN) with sha256 to mint its ID.
+   Same content -> same ID, any edit -> different ID.
+2. ``_verify_serialized_id`` is the tamper check: every ``from_dict`` rebuilds the record
+   from its fields, recomputes the hash, and REJECTS the payload if the stored ID does
+   not match -- a persisted record cannot be silently altered.
+3. Evidence types: ``EvidenceSpan`` pins a parsed field to the exact character span of
+   source text (offsets must match the text length); ``AmountMention`` ties a monetary
+   amount to its span and an ``AmountKind`` role (with UNCLASSIFIED for amounts whose
+   role could not be grounded); ``ObservedAction`` bundles a turn's parsed content.
+4. Deception-evidence types: ``CommitmentEvidence``, ``PlanEvidence``, and
+   ``ExecutedActionEvidence`` record promises, stated intentions, and what was actually
+   done -- the raw material for rules.py.
+5. ``Fact`` is visibility-scoped ground truth: subject, predicate, value, plus
+   ``visible_to`` listing exactly which roles may see it -- this is how private facts are
+   represented. ``Offer``, ``Disclosure``, ``DisclosureObligation`` (with tri-state
+   ``DisclosureResult`` and applicability states), ``CommittedDisclosure``,
+   ``DisclosureDecision``/``DisclosureEvaluation``, ``Agreement``, ``Outcome``, and
+   ``NegotiationAction`` (the typed action envelope the adjudicator accepts, kinds in
+   ``ActionKind``) complete the vocabulary. All carry ``SCHEMA_VERSION``.
+Where this fits: the shared vocabulary between the negotiation stage (adjudicator
+events) and the label stage (domain/rules.py) of the negotiation -> capture -> label
+pipeline; content hashing is what lets downstream labeling trust stored records.
+"""
 
 from __future__ import annotations
 
@@ -183,18 +214,29 @@ class AmountMention:
     amount: int
     evidence: EvidenceSpan
     currency: str = "USD"
+    # "exact" (the default), "lower" ("worth at least $77"), or "upper"
+    # ("worth at most $50"). A bound is still a checkable claim: a lower bound
+    # above the true value, or an upper bound below it, contradicts the fact.
+    bound: str = "exact"
 
     def __post_init__(self) -> None:
         if self.amount < 0:
             raise ValueError("Amount cannot be negative")
+        if self.bound not in {"exact", "lower", "upper"}:
+            raise ValueError("bound must be exact, lower, or upper")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "kind": self.kind.value,
             "amount": self.amount,
             "currency": self.currency,
             "evidence": self.evidence.to_dict(),
         }
+        if self.bound != "exact":
+            # Only bounded mentions carry the key, so ids of exact mentions
+            # parsed before bounds existed do not change.
+            payload["bound"] = self.bound
+        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> AmountMention:
@@ -203,6 +245,7 @@ class AmountMention:
             amount=int(data["amount"]),
             currency=str(data.get("currency", "USD")),
             evidence=EvidenceSpan.from_dict(data["evidence"]),
+            bound=str(data.get("bound", "exact")),
         )
 
 

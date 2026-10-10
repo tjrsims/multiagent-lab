@@ -9,6 +9,37 @@
 #   python train_probes.py --data ./experiment_outputs/merged_activations_*.pt
 #   python train_probes.py --compare results_9b.json results_27b.json
 
+"""Offline probe-training and analysis pipeline over a saved activation dataset.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+A "linear probe" is a simple linear model (ridge regression or logistic
+classifier) trained to predict a label — here, deception — from a frozen
+activation vector; if it succeeds on held-out data, the model's residual
+stream linearly encodes that information. AUC/AUROC (area under the ROC
+curve) is the headline metric: 0.5 = chance, 1.0 = perfect ranking.
+1. Result dataclasses (`ProbeResult`, `ThresholdSensitivityResult`,
+   `LayerAnalysisResult`, `GeneralizationResult`) structure the outputs.
+2. `_train_test_indices` and friends enforce group-aware splits — rows from
+   one trial family or dyad never straddle train/test.
+3. Probe trainers: `train_ridge_probe`, `train_logistic_probe`,
+   `train_mass_mean_probe` (Marks & Tegmark difference-of-class-means
+   direction), plus multi-seed wrappers and threshold sensitivity.
+4. Analyses: per-layer sweeps (`train_probes_per_layer`, `find_best_layer`
+   select layers by held-out AUC), cross-scenario generalization, cross-mode
+   transfer, round-trajectory (temporal), dyadic-pair, and outcome
+   prediction analyses; sanity checks (random labels, train/test gap).
+5. `_sample_keep_mask` applies the negotiation-only mask and *recomputes* QC
+   from stored response text where possible; rows lacking a reproducible or
+   reviewed QC result fail closed ('qc_unavailable') and are dropped.
+6. `run_full_analysis` — note that `probes/mech_interp_tools.py` also
+   defines a function with this name; THIS file's version is the real
+   end-to-end pipeline invoked by the CLI and analyze_data.py.
+Where this fits: the probes stage of the scenarios -> agents -> capture ->
+labels -> QC -> dataset -> probes/causal/benchmark pipeline; it only ever
+reads datasets produced by save_dataset()/DatasetBuilder.
+"""
+
 import argparse
 import json
 from pathlib import Path

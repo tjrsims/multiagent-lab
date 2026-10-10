@@ -1,4 +1,34 @@
-"""Canonical schemas shared by activation producers and serializers."""
+"""Canonical schemas shared by activation producers and serializers.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+`ActivationSample` is the canonical row of the whole project: one model turn
+with its captured activations (per-layer residual-stream tensors), the
+prompt/response text, BOTH label families — `actual_deception` (third-person
+ground truth about the acting agent) and `perceived_deception` (that agent's
+estimate of its counterpart) — and full lineage.
+Key fields worth knowing:
+1. `scenario_params` carries the trial's private facts (true walkaway, true
+   value, ...). The fact-informed benchmark view in `benchmark/views.py`
+   depends on this field being present in every row.
+2. Lineage IDs (`generation_record_id`, `label_record_ids`,
+   `interaction_event_id`, `trial_family_id`, `scenario_instance_id`,
+   counterbalance/role/surface assignment ids) tie the row back to the exact
+   generation call, labels, event, and experimental cell that produced it.
+3. `sample_type` defaults to "unclassified" — rows are ineligible for
+   training until a producer explicitly classifies them. Values assigned in
+   code: 'negotiation' (clean adjudicated decisions, the only trainable
+   kind), 'qc_rejected', 'rejected_proposal', and the probe interventions
+   'pre_verification' / 'post_plausibility'.
+4. Probe rounds use sentinel `round_num` values: -1 for pre_verification
+   (a typed verification question before acting) and -2 for
+   post_plausibility (a follow-up after acting). They are separate
+   interventions and are never negotiation samples.
+Where this fits: the shared contract between capture (evaluation.py /
+runtime), QC, the dataset builder, and every consumer (probes, causal,
+benchmark) in the scenarios -> agents -> capture -> labels -> QC ->
+dataset -> probes/causal/benchmark pipeline.
+"""
 
 from __future__ import annotations
 
@@ -111,6 +141,10 @@ class ActivationSample:
     role_assignment_id: Optional[str] = None
     order_assignment_id: Optional[str] = None
     counterpart_assignment_id: Optional[str] = None
+    # Content hash of the counterpart policy spec that rendered the counterpart
+    # prompt (``CounterpartPolicySpec.policy_id``); module policies are
+    # identity bearing provenance, like the profile and protocol.
+    counterpart_policy_id: Optional[str] = None
     surface_assignment_id: Optional[str] = None
     counterbalance_id: Optional[str] = None
     first_mover_id: Optional[str] = None
@@ -120,3 +154,27 @@ class ActivationSample:
     counterpart_profile: Optional[str] = None
     intervention_design_id: Optional[str] = None
     intervention_application_receipt_ids: List[str] = field(default_factory=list)
+    # Rule-v2 turn-label provenance (benchmark_v1_fixes Phase 1). These mirror
+    # the selected rule ``LabelRecord`` so dataset rows can be filtered by claim
+    # status and label source without reloading the label records.
+    claim_status: Optional[str] = None
+    behavior_subtype: Optional[str] = None
+    label_reason_codes: List[str] = field(default_factory=list)
+    rule_version: Optional[str] = None
+    label_source: Optional[str] = None
+    claim_values: List[float] = field(default_factory=list)
+    offer_values: List[float] = field(default_factory=list)
+    # Tolerance frozen into the rule that produced this row's label (rule v2);
+    # the benchmark's fact-informed baseline relabels with exactly this.
+    label_tolerance: Dict[str, float] = field(default_factory=dict)
+    # Which runtime produced the row: ``transactional`` (canonical) or
+    # ``legacy_compatibility``. Structured-evidence scenarios are only valid
+    # on the transactional path.
+    runtime_path: Optional[str] = None
+    # Matched-pair twin provenance (Phase 2): ``above``/``below`` and the shared
+    # claim anchor; ``None`` for ordinary (unpaired) instances.
+    pair_role: Optional[str] = None
+    pair_anchor: Optional[float] = None
+    # Repeated-rollout index within one family x assignment (0-based); ``None``
+    # when the run did not request rollouts.
+    rollout_index: Optional[int] = None

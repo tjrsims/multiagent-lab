@@ -106,3 +106,44 @@ def test_game_master_memory_can_retain_repeated_events() -> None:
         "[putative_event] Alice: repeats offer",
         "[putative_event] Alice: repeats offer",
     ]
+
+
+
+def test_repository_never_imports_symbols_removed_upstream() -> None:
+    """Upstream main dropped these; our code must not depend on them."""
+    import re
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parents[1]
+    offenders = []
+    for package in ("negotiation", "interpretability", "end_bench", "config"):
+        for path in (root / package).rglob("*.py"):
+            if path.name == "concordia_runtime.py":
+                continue  # it lists the removed symbols by design
+            text = path.read_text(encoding="utf-8")
+            for symbol in concordia_runtime.REMOVED_UPSTREAM_SYMBOLS:
+                if re.search(rf"\b{re.escape(symbol)}\b", text):
+                    offenders.append((str(path.relative_to(root)), symbol))
+    assert offenders == []
+
+
+def test_act_component_constructor_contract_is_the_stable_subset() -> None:
+    """We pass only kwargs that exist in both 2.4.0 and upstream main."""
+    import inspect
+
+    from concordia.components.agent import concat_act_component
+
+    from negotiation.components import scoped_act
+
+    upstream = inspect.signature(concat_act_component.ConcatActComponent.__init__)
+    assert {"model", "component_order", "prefix_entity_name", "randomize_choices"} <= set(
+        upstream.parameters
+    )
+    ours = inspect.signature(scoped_act.ScopedConcatActComponent.__init__)
+    assert {"action_scope_factory", "prefix_entity_name"} <= set(ours.parameters)
+
+
+def test_audit_metadata_is_well_formed() -> None:
+    assert len(concordia_runtime.UPSTREAM_TAG_COMMIT) == 40
+    assert len(concordia_runtime.AUDITED_MAIN_COMMIT) == 40
+    assert concordia_runtime.AUDITED_MAIN_DATE <= concordia_runtime.AUDIT_PERFORMED

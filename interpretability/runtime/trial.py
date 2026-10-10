@@ -1,4 +1,32 @@
-"""Replayable trial state machine independent of model execution."""
+"""Replayable trial state machine independent of model execution.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+A trial here is an append-only sequence of validated state transitions, not
+mutable objects: you can only add events, and every event must be legal.
+1. `TrialState` and `_ALLOWED_TRANSITIONS` define the state machine —
+   created -> compiled -> agents_built -> initialized, then per-round
+   proposed -> captured -> adjudicated (single-turn or batch variants),
+   with interventions and observations at defined boundaries; any other
+   transition raises.
+2. `_validate_state_payload` lists the record references each target state
+   must carry (scenario_instance_id at COMPILED, generation_call_id at
+   TURN_PROPOSED, generation_record_id at ACTION_CAPTURED, receipt and
+   content_hash for interventions, ...).
+3. `TrialRuntimeEvent` is one immutable transition whose `event_id` is a
+   SHA-256 content hash of its canonical JSON — tamper with any field and
+   the id no longer matches. (Events are chained by validated sequence and
+   lineage checks rather than by embedding the previous event's hash.)
+4. `TrialRunner.transition()` appends events; `_validate_event_lineage`
+   binds each ACTION_CAPTURED to the exact TURN_PROPOSED that produced it
+   (same actor, round, and generation call), so a captured activation can
+   always be traced to its proposal. `from_state`/`get_state` make the
+   whole trial serializable and replayable; `project_transcript` derives
+   the readable transcript from events alone.
+Where this fits: the agents/capture stage of the scenarios -> agents ->
+capture -> labels -> QC -> dataset -> probes/causal/benchmark pipeline;
+runtime/runner.py drives this machine and events/replay.py audits it.
+"""
 
 from __future__ import annotations
 

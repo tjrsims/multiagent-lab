@@ -4,6 +4,28 @@ Replay means rebuilding immutable views from recorded events.  It never calls a
 model and makes no claim that stochastic inference would regenerate the same
 tokens.  Resume inspection reports structural event boundaries only; it does
 not infer that arbitrary in-memory Concordia state is serializable.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This is the model-free audit path: given only the recorded event stream from
+a run, it deterministically rebuilds transcripts, per-agent views, trial
+state, activation-sample rows, dyad structure, and metric inputs — so labels
+and provenance can be checked on a laptop without a GPU or any model call.
+1. `ProjectionName` enumerates the six rebuildable views; the corresponding
+   projectors are imported from `events/projectors.py` and applied over an
+   `EventReader` stream of typed payloads (`events/payloads.py`).
+2. `ResumeClassification` and `SAFE_RESUME_BOUNDARY_EVENT_TYPES` classify
+   a partial event stream: completed, failed, resumable at a safe
+   structural boundary, restart-required, or invalid — without ever
+   claiming full in-memory state could be reconstructed.
+3. Size and stream limits (DEFAULT_MAX_RECORD_BYTES etc.) keep replay safe
+   against oversized or malformed inputs.
+Because replay is deterministic, two people replaying the same event files
+must derive identical projections — that is what makes recorded labels
+auditable after the fact.
+Where this fits: an offline audit companion to the capture/labels stages of
+the scenarios -> agents -> capture -> labels -> QC -> dataset ->
+probes/causal/benchmark pipeline.
 """
 
 from __future__ import annotations

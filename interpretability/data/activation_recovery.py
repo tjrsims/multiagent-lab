@@ -17,7 +17,14 @@ from .io import load_array_bundle, save_array_bundle
 from .schema import ActivationSample
 
 
-ACTIVATION_RECOVERY_SCHEMA_VERSION = "activation-recovery/3"
+ACTIVATION_RECOVERY_SCHEMA_VERSION = "activation-recovery/4"
+# Older snapshot shapes this loader still accepts for audit, keyed by the
+# version string they declare, with the runtime-checkpoint fields they lack.
+# ``activation-recovery/3`` predates text-only ``text_turns``; a /3 snapshot
+# loads with that list empty (it never captured text rows separately).
+LEGACY_RECOVERY_SCHEMA_UPGRADES: dict[str, tuple[str, ...]] = {
+    "activation-recovery/3": ("text_turns",),
+}
 
 _ARRAY_FIELDS = {"activations", "followup_activations"}
 _SAMPLE_FIELDS = tuple(field.name for field in fields(ActivationSample))
@@ -58,6 +65,7 @@ _RUNTIME_CHECKPOINT_FIELDS = {
     "generation_records",
     "label_records",
     "captured_turns",
+    "text_turns",
     "agent_states",
     "retry_counts",
     "protocol",
@@ -816,7 +824,10 @@ def load_activation_recovery_checkpoint(path: str | Path) -> dict[str, Any]:
             "activation recovery manifest fields are not exact; "
             f"missing={missing}, unknown={unknown}"
         )
-    if manifest.get("checkpoint_schema_version") != ACTIVATION_RECOVERY_SCHEMA_VERSION:
+    declared_version = manifest.get("checkpoint_schema_version")
+    if declared_version != ACTIVATION_RECOVERY_SCHEMA_VERSION and (
+        declared_version not in LEGACY_RECOVERY_SCHEMA_UPGRADES
+    ):
         raise ValueError("unsupported activation recovery schema version")
     if manifest.get("publication_status") != "non_publishable_recovery":
         raise ValueError("activation recovery cannot be treated as a dataset")
@@ -824,6 +835,17 @@ def load_activation_recovery_checkpoint(path: str | Path) -> dict[str, Any]:
         raise ValueError("activation recovery sample schema does not match runtime")
     if manifest.get("recovery_hash") != _recovery_hash(manifest, arrays):
         raise ValueError("activation recovery content hash mismatch")
+    if declared_version != ACTIVATION_RECOVERY_SCHEMA_VERSION:
+        # Versioned shape upgrade: fill the fields a legacy snapshot could not
+        # have, so audit/manual salvage of older runs keeps working. The
+        # executor-version check below still decides whether the embedded
+        # runtime envelope is usable.
+        runtime_payload = manifest.get("runtime_checkpoint")
+        if isinstance(runtime_payload, Mapping):
+            upgraded = dict(runtime_payload)
+            for field_name in LEGACY_RECOVERY_SCHEMA_UPGRADES[declared_version]:
+                upgraded.setdefault(field_name, [])
+            manifest = {**manifest, "runtime_checkpoint": upgraded}
 
     from interpretability.schema_registry import (
         schema_registry,
@@ -1020,6 +1042,7 @@ def load_activation_recovery_checkpoint(path: str | Path) -> dict[str, Any]:
 
 __all__ = [
     "ACTIVATION_RECOVERY_SCHEMA_VERSION",
+    "LEGACY_RECOVERY_SCHEMA_UPGRADES",
     "load_activation_recovery_checkpoint",
     "save_activation_recovery_checkpoint",
 ]

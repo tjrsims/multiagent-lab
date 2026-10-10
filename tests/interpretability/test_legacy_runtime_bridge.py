@@ -28,7 +28,9 @@ from negotiation.game_master.adjudication import EventStatus, InteractionEvent
 
 
 def _bare_runner() -> InterpretabilityRunner:
-    return object.__new__(InterpretabilityRunner)
+    runner = object.__new__(InterpretabilityRunner)
+    runner.text_samples = []  # owned by __init__, which this helper bypasses
+    return runner
 
 
 def _bridge_execution(

@@ -18,6 +18,28 @@ Usage:
     # Show help
     deception --help
     deception run --help
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This file is the Click-based entry point; `run_deception_experiment.py` is the
+equivalent argparse front door — both drive the same pipeline.
+1. `cli` is the command group; `run` is the main command. Its flags (or an
+   authoritative `--config` JSON, which may not be mixed with other flags)
+   resolve into a frozen ExecutionSurfacePlan via `resolve_execution_surface()`
+   / `resolve_config_execution_surface()` before any model is loaded.
+2. The track manifest (`experiment_track_manifest.json`) describing the whole
+   run design is written to disk before model initialization, so a crashed run
+   still leaves an auditable record. Note there is no `--parallel-pod` here;
+   the argparse entry point rejects that flag on purpose because ID offsets
+   can overlap seed windows instead of partitioning the schedule.
+3. `_run_emergent_experiment()` / `_run_instructed_experiment()` drive the
+   `InterpretabilityRunner` (negotiation rounds + activation capture), then
+   `_train_probes_on_data()` fits probes and `_run_causal_validation()`
+   optionally runs interventions.
+4. `train` retrains probes on a saved dataset; `scenarios` lists scenarios;
+   the `events` group inspects recorded event streams without loading models.
+Where this fits: outermost shell of the pipeline —
+scenarios -> agents -> capture -> labels -> QC -> dataset -> probes/causal.
 """
 
 import json
@@ -35,6 +57,7 @@ from interpretability.tracks import (
     get_track_spec,
 )
 from interpretability.launch import (
+    planned_executions,
     PUBLIC_RESUME_LIMITATION,
     resolve_config_execution_surface,
     resolve_execution_surface,
@@ -284,13 +307,32 @@ def cli():
     show_default=True,
     help='Typed verification/plausibility probes (auto enables alternating only)',
 )
+@click.option(
+    '--rollouts-per-family',
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help=(
+        'Repeat every counterbalance assignment N times with distinct physical '
+        'seeds (DAYJOB-style attempts); rollouts share the family'
+    ),
+)
+@click.option(
+    '--paired-facts/--no-paired-facts',
+    default=False,
+    show_default=True,
+    help=(
+        'Generate matched twins per family (same claim anchor, opposite '
+        'truth) so transcript-only detectors have no prior to exploit'
+    ),
+)
 def run(mode, model, device, dtype, scenarios, scenario_name, trials,
         max_rounds, max_tokens, layers, fast, ultrafast, hybrid, sae,
         sae_layer, evaluator, evaluator_type, skip_api_eval, checkpoint_dir,
         causal, causal_samples,
         high_only, experiment_track, protocol, counterpart_types,
         counterbalance, counterbalance_seed, surface_variants, probe_mode,
-        config_path, output, verbose):
+        rollouts_per_family, paired_facts, config_path, output, verbose):
     """Run a deception detection experiment.
 
     This command runs the complete pipeline:
@@ -410,6 +452,8 @@ def run(mode, model, device, dtype, scenarios, scenario_name, trials,
                 ultrafast=ultrafast,
                 mode=mode,
                 probe_mode=probe_mode,
+                rollouts_per_family=rollouts_per_family,
+                paired_facts=paired_facts,
             )
         except (TypeError, ValueError) as error:
             raise click.UsageError(str(error)) from error
@@ -506,13 +550,14 @@ def run(mode, model, device, dtype, scenarios, scenario_name, trials,
     participant_ids = execution_plan.participant_ids
     captured_actor_ids = execution_plan.captured_actor_ids
     emergent_condition_count = 1 if high_only else 2
+    planned_emergent = planned_executions(
+        execution_plan,
+        scenarios=emergent_scenarios,
+        conditions=emergent_condition_count,
+        families_per_scenario_condition=trials,
+    )
     estimated_emergent_executions = (
-        len(emergent_scenarios)
-        * trials
-        * emergent_condition_count
-        * execution_plan.executions_per_family
-        if mode in {'emergent', 'both'}
-        else 0
+        planned_emergent['total'] if mode in {'emergent', 'both'} else 0
     )
     estimated_instructed_executions = (
         len(instructed_scenarios) * trials * 2
@@ -598,6 +643,7 @@ def run(mode, model, device, dtype, scenarios, scenario_name, trials,
         ),
         'semantic_families_per_scenario_condition': trials,
         'executions_per_family': execution_plan.executions_per_family,
+        'executions_per_scenario': planned_emergent['per_scenario'],
         'estimated_emergent_executions': estimated_emergent_executions,
         'estimated_instructed_legacy_executions': (
             estimated_instructed_executions
@@ -704,6 +750,8 @@ def run(mode, model, device, dtype, scenarios, scenario_name, trials,
             surface_variants=execution_plan.surface_variants,
             run_probes=execution_plan.run_probes,
             executions_per_family=execution_plan.executions_per_family,
+            rollouts_per_family=execution_plan.rollouts_per_family,
+            paired_facts=execution_plan.paired_facts,
         )
         all_results["emergent"] = results
 
@@ -730,6 +778,7 @@ def run(mode, model, device, dtype, scenarios, scenario_name, trials,
                     "executions_per_family": (
                         execution_plan.executions_per_family
                     ),
+                    "executions_per_scenario": planned_emergent['per_scenario'],
                     "estimated_total_physical_executions": (
                         estimated_emergent_executions
                     ),
@@ -1049,6 +1098,103 @@ def events_trace(stream, event_id):
         ))
 
 
+
+@cli.group()
+def benchmark():
+    """Build and score the v1 benchmark views from a saved dataset.
+
+    Pure and offline: no language model is loaded. The only trained detector
+    is a linear probe on stored activations whose layer is chosen on the
+    development partition; the locked test partition is scored once.
+    """
+
+
+@benchmark.command('build')
+@click.option('--dataset', 'dataset_path', required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help='Saved activation dataset (.json manifest; legacy .pt needs --trust-legacy-pt).')
+@click.option('--out', 'out_dir', required=True, type=click.Path(file_okay=False),
+              help='Directory for views_report/split_manifest/pairs/scores/manifest JSON.')
+@click.option('--label-source', type=click.Choice(['rule', 'model_judge', 'gm', 'human']),
+              default='rule', show_default=True,
+              help='The one label source every kept row must carry.')
+@click.option('--rows', type=click.Choice(['claim_bearing', 'all']), default='claim_bearing',
+              show_default=True, help='Keep only claim-bearing turns, or every labeled turn.')
+@click.option('--qc', type=click.Choice(['exclude', 'keep']), default='exclude',
+              show_default=True, help='Exclude QC-rejected rows (default) or keep them.')
+@click.option('--group-key', type=click.Choice(['trial_family_id', 'scenario_instance_id', 'trial_id']),
+              default='trial_family_id', show_default=True, help='Leakage-safe grouping key.')
+@click.option('--allow-legacy-runtime', is_flag=True,
+              help='Admit legacy-runtime rows (never for structured-evidence scenarios).')
+@click.option('--bin-width', type=float, default=5.0, show_default=True,
+              help='Claim bin width for matched pairs.')
+@click.option('--split-seed', type=int, default=42, show_default=True)
+@click.option('--n-bootstrap', type=int, default=1000, show_default=True,
+              help='Family-clustered bootstrap resamples per interval.')
+@click.option('--no-probe', is_flag=True, help='Skip the linear probe on activations.')
+@click.option('--trust-legacy-pt', is_flag=True,
+              help='Allow pickle-capable .pt loading only for a reviewed artifact')
+def benchmark_build(dataset_path, out_dir, label_source, rows, qc, group_key,
+                    allow_legacy_runtime, bin_width, split_seed, n_bootstrap,
+                    no_probe, trust_legacy_pt):
+    """Project, split, pair, score, and stamp one benchmark build."""
+    from interpretability.benchmark.build import (
+        BenchmarkBuildError,
+        build_benchmark,
+    )
+    from interpretability.benchmark.splits import BenchmarkSplitError
+    from interpretability.benchmark.views import ViewsError
+
+    try:
+        result = build_benchmark(
+            dataset_path,
+            out_dir,
+            label_source=label_source,
+            rows=rows,
+            qc=qc,
+            group_key=group_key,
+            allow_legacy_runtime=allow_legacy_runtime,
+            bin_width=bin_width,
+            split_seed=split_seed,
+            n_bootstrap=n_bootstrap,
+            train_probe=not no_probe,
+            trusted_legacy=trust_legacy_pt,
+        )
+    except (ViewsError, BenchmarkSplitError, BenchmarkBuildError, ValueError) as error:
+        click.echo(click.style(f"BUILD FAILED: {error}", fg='red', bold=True))
+        raise SystemExit(1)
+
+    report = result.views.report
+    click.echo(click.style(f"benchmark manifest {result.manifest.manifest_id}", fg='blue', bold=True))
+    click.echo(f"  rows kept: {report.n_kept}/{report.n_input_rows} "
+               f"(groups={report.n_groups}, label_source={report.label_source})")
+    if report.excluded:
+        click.echo("  excluded: " + ", ".join(
+            f"{reason}={count}" for reason, count in sorted(report.excluded.items())
+        ))
+    click.echo(f"  matched pairs: {result.pairs.n_pairs}")
+    if result.probe_selection is not None:
+        click.echo(f"  probe layer (dev-selected): {result.probe_selection.layer}")
+    for score in result.scorecard.detector_scores:
+        auroc = score.auroc
+        click.echo(
+            f"  {score.detector:22s} {score.subset:7s} n={score.n_rows:4d} "
+            f"AUROC={auroc.value:.3f} [{auroc.ci_low:.3f}, {auroc.ci_high:.3f}]"
+        )
+    for gap in result.scorecard.paired_gaps:
+        diff = gap.auroc_difference
+        click.echo(
+            f"  gap {gap.detector_a} - {gap.detector_b} ({gap.subset}): "
+            f"{diff.value:+.3f} [{diff.ci_low:+.3f}, {diff.ci_high:+.3f}] "
+            f"wins/losses/ties={gap.group_wins}/{gap.group_losses}/{gap.group_ties}"
+        )
+    skipped = result.scorecard.extras.get('skipped') or []
+    if skipped:
+        click.echo(click.style(f"  skipped {len(skipped)} score(s); see scores.json", fg='yellow'))
+    for name, path in result.written.items():
+        click.echo(f"  wrote {name}: {path}")
+
+
 # Helper functions (private)
 
 def _run_emergent_experiment(
@@ -1067,6 +1213,8 @@ def _run_emergent_experiment(
     surface_variants=(),
     run_probes=None,
     executions_per_family=1,
+    rollouts_per_family=1,
+    paired_facts=False,
 ):
     """Run emergent deception experiment."""
     if high_only:
@@ -1081,6 +1229,8 @@ def _run_emergent_experiment(
     click.echo(f"Conditions: {[c.value for c in conditions]}")
     click.echo(f"Semantic families per condition: {trials_per_scenario}")
     click.echo(f"Executions per family: {executions_per_family}")
+    click.echo(f"Rollouts per family: {rollouts_per_family}")
+    click.echo(f"Paired facts (twins): {paired_facts}")
     click.echo(f"Max rounds: {max_rounds}")
     click.echo(f"Agent modules: {agent_modules}")
     click.echo(f"Ultrafast mode: {ultrafast}")
@@ -1103,6 +1253,8 @@ def _run_emergent_experiment(
         counterbalance_seed=counterbalance_seed,
         surface_variants=surface_variants,
         run_probes=run_probes,
+        rollouts_per_family=rollouts_per_family,
+        paired_facts=paired_facts,
     )
 
 

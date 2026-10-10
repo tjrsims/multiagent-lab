@@ -1,4 +1,31 @@
-"""Basic negotiation strategy component."""
+"""Basic negotiation strategy component.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This component gives the agent numeric bargaining advice via the classic Strategy pattern.
+It is pure arithmetic and string formatting -- it never calls a language model.
+1. ``StrategyState`` holds the numbers a strategy reasons over: both parties' positions,
+   rounds elapsed, concessions, an estimated ZOPA (Zone Of Possible Agreement -- the value
+   range where a deal is better than walking away for both sides), and a "temperature"
+   that cools from 1.0 toward 0.1 as rounds accumulate.
+2. ``NegotiationStrategy`` is the abstract interface (opening position, concession size,
+   accept/reject advice, tactical text). ``CooperativeStrategy``, ``CompetitiveStrategy``,
+   and ``IntegrativeStrategy`` implement it with different anchoring and concession
+   curves; thresholds come from ``StrategyConfig``.
+3. ``BasicNegotiationStrategy`` is the Concordia ``ContextComponent`` wrapper: __init__
+   validates style/values (reservation value = BATNA floor), picks a strategy object, and
+   seeds the opening position.
+4. ``pre_act`` renders ``get_strategic_context()`` -- positions, estimated ZOPA, tactical
+   guidance, and a suggested next offer with a below-reservation warning.
+5. ``pre_observe`` heuristically parses the opponent's offer value from raw text
+   (``contains_offer``/``parse_offer_value``), then ``_adjust_strategy_for_offer`` nudges
+   the target and ``update_state`` re-estimates the ZOPA. ``post_act`` advances rounds and
+   cools the temperature; ``get_state``/``set_state`` checkpoint everything (including a
+   legacy "position|rounds" string form).
+Where this fits: negotiation stage of the negotiation -> capture -> label pipeline; this
+advice text enters the captured acting prompt, but ground truth about offers and deception
+comes from game_master/ and domain/, not from these heuristics.
+"""
 
 import abc
 import dataclasses

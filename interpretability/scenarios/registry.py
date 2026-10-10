@@ -5,6 +5,27 @@ There is intentionally no module-global registry.  Callers own a
 request exact semantic versions (or an explicitly configured default).
 Filesystem and package-resource loaders validate the complete persisted wire
 record before mutating registry state.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+1. Specs are content-addressed: each `ScenarioSpec` is identified by
+   (scenario_id, semantic version) plus a SHA-256 hash of its canonical JSON,
+   so the registry can prove that "ultimatum_bluff 1.0.0" always means the
+   exact same bytes.
+2. The error hierarchy under `ScenarioRegistryError` makes failure modes
+   explicit: `DuplicateScenarioError` (same identity registered twice) vs
+   `ScenarioCollisionError` (same key or hash pointing at *different*
+   content — the dangerous case the hash check exists to catch), plus
+   unknown-id/unknown-version/version-required lookup errors.
+3. `RegistryEntry` rows form an immutable, sorted manifest; `ScenarioRegistry`
+   (below) owns registration, exact-version lookup, and the optional
+   explicitly-configured default version.
+4. Loader helpers read released `.scenario.json` files or package resources,
+   refusing symlinks, path traversal, and oversized or malformed wire
+   records before any registry state changes.
+Where this fits: part of the scenarios stage of the scenarios -> agents ->
+capture -> labels -> QC -> dataset -> probes/causal/benchmark pipeline —
+it pins exactly which scenario definition a run executed, for provenance.
 """
 
 from __future__ import annotations

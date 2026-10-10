@@ -4,6 +4,24 @@ This builder is intended for high-throughput experiments that need the acting
 model's generation call to be the only model-dependent work performed by an
 agent.  It deliberately excludes optional reasoning modules and retrieval that
 would make additional model calls.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This file builds the leanest agent profile: exactly one model call per action.
+1. ``UltrafastNegotiatorAgent`` is just Concordia's standard entity class tagged with an
+   immutable ``agent_profile`` string so datasets can record which builder produced it.
+2. Small validators (``_nonempty_text``, ``_validate_modules``,
+   ``_validating_scope_factory``) fail fast on bad inputs; note this profile REJECTS any
+   optional reasoning modules by design.
+3. ``build_agent`` assembles only constant instructions, a constant goal, recent
+   observations, and their backing memory. None of these components receives a language
+   model, so nothing runs during ``pre_act`` except deterministic text rendering.
+4. The single model call happens in ``ScopedConcatActComponent`` (the final acting call),
+   optionally wrapped in the caller's activation-capture context manager. Choice
+   randomization is disabled for determinism.
+Where this fits: this is the clean-capture / high-throughput profile of the
+negotiation -> capture -> label pipeline -- one prompt, one forward pass, one response,
+so captured activations map one-to-one onto negotiation decisions.
 """
 
 from __future__ import annotations
@@ -107,6 +125,8 @@ def build_agent(
         ``ultrafast_minimal/1`` and whose state uses Concordia's normal
         ``get_state``/``set_state`` contract.
     """
+    # Step 1: validate every input up front (names non-empty, modules empty, memory bank
+    # and model of the right shape) so a misconfigured experiment fails before any run.
     agent_name = _nonempty_text('name', name)
     agent_goal = _nonempty_text('goal', goal)
     _validate_modules(modules)
@@ -124,6 +144,8 @@ def build_agent(
     ):
         raise TypeError('action_call_scope_factory must be callable or None.')
 
+    # Step 2: the entire context is model-free -- two Constant text blocks (instructions
+    # and goal), an observation recorder, an observation replayer, and backing memory.
     memory = agent_components.memory.AssociativeMemory(memory_bank=memory_bank)
     components = {
         _INSTRUCTIONS_COMPONENT: agent_components.constant.Constant(
@@ -146,6 +168,7 @@ def build_agent(
         ),
         agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY: memory,
     }
+    # Step 3: fixed prompt reading order -- also the input to any captured forward pass.
     component_order = (
         _INSTRUCTIONS_COMPONENT,
         _GOAL_COMPONENT,
@@ -153,6 +176,8 @@ def build_agent(
         _OBSERVATION_TO_MEMORY_COMPONENT,
         agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY,
     )
+    # Step 4: wrap the caller's capture-scope factory so a malformed context manager is
+    # rejected before generation rather than mid-experiment.
     scope_factory = (
         _validating_scope_factory(action_call_scope_factory)
         if action_call_scope_factory is not None

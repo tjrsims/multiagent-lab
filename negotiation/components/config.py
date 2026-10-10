@@ -1,4 +1,30 @@
-"""Typed, strict configuration contracts for optional agent components."""
+"""Typed, strict configuration contracts for optional agent components.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+Every optional agent module (cultural adaptation, theory of mind, ...) gets a frozen
+(immutable) dataclass here that validates its own fields on construction, so a bad value
+fails at build time instead of mid-experiment.
+1. ``_unit_interval`` and ``_optional_seed`` are the shared validators (0..1 floats and
+   non-negative-int-or-None seeds); each ``*Config`` dataclass calls them in
+   ``__post_init__``. ``MODULE_CONFIG_TYPES`` maps each ``ModuleType`` enum member to its
+   config class.
+2. ``resolve_module_configs`` is the single entry point (called by
+   advanced_negotiator.Entity.build). It normalizes raw keys to ``ModuleType`` and
+   REJECTS any config supplied for a module that is not enabled, plus any unknown field
+   names -- misspellings cannot be silently ignored.
+3. For stochastic modules (those with a ``seed`` field), it resolves a seed: an explicit
+   per-module seed wins; otherwise one is derived deterministically via ``_derived_seed``
+   -- the first 8 bytes of sha256("trial_seed:actor_id:module") -- so the same trial,
+   actor, and module always reproduce the same randomness. If neither source exists it
+   raises rather than falling back to nondeterminism.
+4. Alongside each resolved config it returns a provenance record (source, trial seed,
+   resolved seed, module, actor) so experiment metadata can state exactly where every
+   seed came from.
+Where this fits: negotiation-stage plumbing in the negotiation -> capture -> label
+pipeline; deterministic seeds are what make trials reproducible and their metadata
+auditable downstream.
+"""
 
 from __future__ import annotations
 
@@ -174,6 +200,8 @@ def resolve_module_configs(
     if not isinstance(actor_id, str) or not actor_id:
         raise ValueError('actor_id must be a non-empty string.')
     enabled = tuple(enabled_modules)
+    # Step 1: normalize keys to ModuleType and reject configs for unknown or
+    # disabled modules -- nothing supplied by the caller may be silently ignored.
     normalized: dict[ModuleType, Mapping[str, Any] | ModuleConfig] = {}
     for raw_name, raw_config in raw_configs.items():
         try:
@@ -195,6 +223,9 @@ def resolve_module_configs(
             )
         normalized[module_type] = raw_config
 
+    # Step 2: build each enabled module's frozen config (rejecting unknown field
+    # names), then resolve seeds -- explicit module seed wins, else derive one from
+    # trial_seed via sha256, else fail -- and record provenance for each.
     resolved: dict[ModuleType, Any] = {}
     provenance: dict[ModuleType, dict[str, Any]] = {}
     for module_type in enabled:

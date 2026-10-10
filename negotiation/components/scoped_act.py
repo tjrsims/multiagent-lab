@@ -1,4 +1,24 @@
-"""Act component with an injectable scope around final action generation."""
+"""Act component with an injectable scope around final action generation.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This file is the white-box activation-capture hook for negotiation agents.
+1. ``ScopedConcatActComponent`` subclasses Concordia's ``ConcatActComponent`` (the
+   component that concatenates every context component's ``pre_act`` text into one prompt
+   and asks the model for the agent's action). It overrides exactly one method.
+2. ``__init__`` accepts an optional ``action_scope_factory``: a zero-argument callable
+   returning a fresh context manager. The caller (the interpretability runner) supplies a
+   factory whose context manager installs forward-pass hooks on the model.
+3. ``get_action_attempt`` wraps ONLY the final decision-producing model call in that
+   context manager (or a no-op ``nullcontext`` when no factory is given), then delegates
+   to the parent implementation unchanged.
+Key property: auxiliary model calls made earlier by individual components during
+``pre_act`` (e.g. the reflection questions in ``base_negotiator.py``) happen OUTSIDE this
+scope. Activations captured inside the scope therefore come from the same single model
+call that produced the stored response text -- a scientific invariant of this project.
+Where this fits: this is the seam between the "negotiation" and "capture" stages of the
+negotiation -> capture -> label pipeline.
+"""
 
 from __future__ import annotations
 
@@ -40,10 +60,15 @@ class ScopedConcatActComponent(concat_act_component.ConcatActComponent):
         action_spec: entity_lib.ActionSpec,
     ) -> str:
         """Run final generation in the injected call scope, if configured."""
+        # Step 1: build a fresh scope for THIS call only. With no factory configured,
+        # nullcontext() makes the wrapper behave exactly like the stock component.
         scope = (
             self._action_scope_factory()
             if self._action_scope_factory is not None
             else nullcontext()
         )
+        # Step 2: enter the scope (e.g. activation-capture hooks attach here), then let
+        # the parent class assemble the prompt from `contexts` and query the model. The
+        # component pre_act calls already happened before this method -- outside the scope.
         with scope:
             return super().get_action_attempt(contexts, action_spec)

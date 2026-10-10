@@ -1,4 +1,30 @@
-"""Advanced negotiation agent prefab with modular enhancements."""
+"""Advanced negotiation agent prefab with modular enhancements.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This file is the "base negotiator + optional cognitive modules" factory. A "prefab" is
+Concordia's recipe object: a dataclass whose ``build()`` turns params into a live agent.
+1. ``Entity.build`` first parses the ``modules`` param (comma string or sequence) and
+   validates every name against the ``ModuleType`` enum -- unknown or duplicate module
+   names raise immediately rather than being silently dropped.
+2. It then parses ``module_configs`` (JSON string or mapping) and calls
+   ``resolve_module_configs`` (components/config.py), which merges per-module overrides
+   into frozen config dataclasses and derives a deterministic per-module random seed
+   (sha256 of "trial:actor:module") plus a provenance record saying how each seed was made.
+3. For each enabled module it constructs the matching ``ContextComponent`` (theory of
+   mind, uncertainty, etc.), keyed by ``MODULE_COMPONENT_NAMES`` so component lookup keys
+   stay aligned with ``ModuleType``.
+4. Finally it copies its own params, sets ``extra_components`` to the built modules, and
+   re-runs the *base* prefab (``base_negotiator.Entity``). So "advanced" is literally the
+   base agent with module components appended last in context order -- module text appears
+   after instructions/memory/strategy in the acting prompt.
+5. ``build_agent`` is the keyword-friendly wrapper; ``build_cultural_agent``,
+   ``build_temporal_agent``, ``build_collective_agent``, and ``build_adaptive_agent`` are
+   preset bundles of modules + configs on top of it.
+Where this fits: this is the negotiation-stage agent factory in the
+negotiation -> capture -> label pipeline; the modules it injects shape both behavior and
+the prompts whose acting-model calls are later captured as activations.
+"""
 
 from collections.abc import Mapping
 import dataclasses
@@ -74,6 +100,8 @@ class Entity(prefab_lib.Prefab):
         Returns:
             Configured advanced negotiation agent
         """
+        # Step 1: parse and validate the module list against ModuleType. Fail loudly on
+        # unknown or duplicate names so a typo cannot silently disable a module.
         # Parse module list from params
         modules_value = self.params.get('modules', '')
         if isinstance(modules_value, str):
@@ -100,6 +128,8 @@ class Entity(prefab_lib.Prefab):
         if len(set(modules)) != len(modules):
             raise ValueError('Negotiation modules cannot contain duplicates.')
 
+        # Step 2: parse per-module config overrides, then resolve them into frozen config
+        # objects plus deterministic seeds (sha256 of trial:actor:module) with provenance.
         # Parse module configs from JSON string
         module_configs_value = self.params.get('module_configs', '{}')
         if isinstance(module_configs_value, Mapping):
@@ -121,6 +151,8 @@ class Entity(prefab_lib.Prefab):
             actor_id=str(self.params.get('name', 'AdvancedNegotiator')),
         )
 
+        # Step 3: instantiate a ContextComponent per enabled module, keyed by the
+        # canonical MODULE_COMPONENT_NAMES entry for its ModuleType.
         # Build extra components for selected modules
         extra_components = {}
 
@@ -179,6 +211,9 @@ class Entity(prefab_lib.Prefab):
             )
             extra_components[MODULE_COMPONENT_NAMES[ModuleType.THEORY_OF_MIND]] = tom
 
+        # Step 4: delegate to the base prefab with the modules passed as extra_components.
+        # base_negotiator appends extras after its own components, so modules always come
+        # last in the acting prompt's context order.
         # Update params to include extra components
         enhanced_params = dict(self.params)
         enhanced_params['extra_components'] = extra_components

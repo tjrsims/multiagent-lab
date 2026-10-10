@@ -1,4 +1,29 @@
-"""Pickle-free fitted artifacts for headline logistic probes."""
+"""Pickle-free fitted artifacts for headline logistic probes.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+Fitted probes are shared and reloaded, and Python's default serialization
+(pickle) executes arbitrary code on load — unacceptable for artifacts that
+may cross machines or people. This module serializes a fitted sklearn
+pipeline as schema-validated JSON plus an NPZ array bundle instead, and
+reloading reconstructs the estimators field by field.
+1. `HEADLINE_PROBE_SCHEMA_VERSION` and the `_BASE_STEPS`/`_PCA_STEPS`
+   constants pin exactly which pipeline shapes (scaler [+ PCA] + logistic
+   probe) and solvers are representable; anything else is rejected.
+2. `HeadlineProbeArtifact` is the loaded result: reconstructed pipeline,
+   metadata (selected layer, test metrics), and split provenance, with
+   `predict`/`predict_proba` passthroughs.
+3. Validators (`_validate_metadata`, `_validate_metric_set`,
+   `_require_exact_keys`, ...) demand exact key sets, finite numbers, and
+   in-range metrics; a checksum over the canonical JSON contract detects
+   tampering.
+4. Save/load helpers extract each fitted attribute (scaler means/scales,
+   PCA components, probe coef_/intercept_) into arrays and rebuild new
+   estimator objects from them — no code object is ever deserialized.
+Where this fits: the probes stage of the scenarios -> agents -> capture ->
+labels -> QC -> dataset -> probes/causal/benchmark pipeline; metrics.py's
+`NestedGroupedEvaluation.save_artifact` writes through this module.
+"""
 
 from __future__ import annotations
 

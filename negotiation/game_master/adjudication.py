@@ -1,4 +1,42 @@
-"""Transactional public adjudication boundary for negotiation game masters."""
+"""Transactional public adjudication boundary for negotiation game masters.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This is the deterministic referee and scorekeeper of a negotiation. Typed actions come
+in; validated, logged, applied state changes come out. It never calls a language model,
+so nothing an agent says can talk it into misrecording what happened.
+1. Small vocabulary first: ``ValidationMode`` (HARD failures block commit, ADVISORY ones
+   are recorded evidence only), ``EventStatus``, and ``RejectionPolicy`` (retry the same
+   actor for alternating play; retry the whole batch for simultaneous play).
+2. ``ValidationDecision`` is one validator's recorded verdict; ``InteractionEvent`` is
+   the immutable committed-or-rejected record of one action; ``DispatchReceipt`` proves a
+   module saw an event; ``ActionResolution`` bundles event + agreement + outcome. Each
+   carries a ``stable_id`` content hash (from domain/schema.py) that ``from_dict``
+   re-verifies, making the event log tamper-evident: edit a stored field and the hash
+   check fails on load.
+3. ``NegotiationAdjudicator.submit`` (and ``submit_batch`` for simultaneous rounds) runs
+   ordered legality validation via ``_validator_bindings``: ``_validate_core`` enforces
+   turn order, participant membership, live offers, and recipient-only accept/reject;
+   ``_validate_terms`` defers offer terms to the domain validator; ``_validate_module``
+   snapshots and restores module state so even an impure module cannot mutate anything
+   while merely validating.
+4. Committed events are applied atomically: ``_resume_pending_event`` /
+   ``_resume_pending_batch`` snapshot tracker, offers, and counters, apply via
+   ``_apply_committed_action``, and roll everything back on any exception. Duplicate
+   submissions of an already-resolved action are idempotent.
+5. ``_dispatch_missing`` notifies GM modules exactly once per (event, module, version)
+   using ``DispatchReceipt`` keys, restoring module state and raising
+   ``ModuleDispatchError`` if a module fails.
+6. ``get_state``/``set_state`` checkpoint everything; ``set_state`` restores atomically
+   (rollback on failure) and ``_validate_restored_state`` re-derives and cross-checks
+   sequences, hashes, receipts, and pending sets, so a corrupted checkpoint is rejected
+   rather than trusted.
+Note the ``pre_act`` here returns only a small status block, and the GM prefab excludes
+this component from prompt assembly anyway -- callers invoke it out-of-band via submit().
+Where this fits: negotiation stage of the negotiation -> capture -> label pipeline; its
+event log and outcomes are the trusted factual record that ground-truth deception
+labeling (domain/rules.py) is evaluated against.
+"""
 
 from __future__ import annotations
 

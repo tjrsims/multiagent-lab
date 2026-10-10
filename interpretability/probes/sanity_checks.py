@@ -9,6 +9,34 @@
 #       causal = run_causal_validation(model, activations, gm_labels, best_layer)
 #   print_limitations(len(gm_labels), "Gemma 2 9B", causal.get("causal_effect_detected", False))
 
+"""Negative controls that must fail for probe results to be believable.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+A probe that scores well can still be an artifact. These checks estimate the
+"null" — what score a probe gets when there is nothing real to find.
+1. `sanity_check_random_labels` trains probes on permuted labels and expects
+   R-squared near zero. Crucially it uses group-BLOCK permutation
+   (`permute_group_blocks`): whole trial-family/dyad groups swap label
+   blocks with each other. A plain per-row shuffle would break the strong
+   within-group label correlation and produce a falsely easy null,
+   flattering the real probe. When grouping information is missing the
+   check returns {"available": False, ...} — it reports itself unavailable
+   rather than silently degrading to the misleading row shuffle.
+2. `sanity_check_train_test_gap` flags memorization: a large train-minus-
+   test performance gap means the probe fits noise.
+3. `sanity_check_label_variance` catches degenerate label distributions.
+4. `sanity_check_layer_0_baseline` compares against layer 0 (the embedding
+   layer): if layer 0 probes best, the signal is probably surface input
+   features, not a learned internal representation.
+5. `run_all_sanity_checks` bundles the above; `run_causal_validation` is a
+   lightweight steering-hook check, and `print_limitations` prints honest
+   caveats for reports.
+Where this fits: the probes stage of the scenarios -> agents -> capture ->
+labels -> QC -> dataset -> probes/causal/benchmark pipeline — run after
+train_probes.py, before believing any AUC.
+"""
+
 import logging
 import numpy as np
 from typing import Dict, Any, Optional, Tuple

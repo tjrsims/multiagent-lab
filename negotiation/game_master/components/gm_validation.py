@@ -12,7 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Negotiation validation and agreement enforcement component."""
+"""Negotiation validation and agreement enforcement component.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This component answers one question deterministically: does an offer's TERMS satisfy the
+configured domain rules? (Turn order and who-may-act legality live in the adjudicator;
+this file is about the content of offers.) No model calls anywhere.
+1. ``ValidationRule`` pairs a name with a boolean predicate over the terms dict;
+   ``_setup_default_rules`` installs domain presets ('price', 'contract', 'multi_issue'),
+   and ``_get_domain_constraints`` holds the matching numeric bounds.
+2. ``validate_offer`` runs, in order: the rule list, then three toggleable checks --
+   BATNA compliance (``_check_batna_compliance``: a seller's offer must be at or above,
+   a buyer's at or below, their registered walk-away value from ``set_batna``), fairness
+   (``_check_fairness``: flags price deviating >50% from a market price supplied in
+   context), and feasibility (``_check_feasibility``). It returns (is_valid, errors)
+   rather than raising, so callers can record advisory findings.
+3. Feasibility deliberately checks ONLY implemented, typed constraints -- duration
+   bounds, ISO date formats, documented availability -- and never guesses or infers
+   whether unspecified terms are achievable; anything it has no rule for passes.
+4. ``validate_agreement`` re-validates terms from every party's perspective and records
+   an ``Agreement`` with its status and errors; ``enforce_agreement`` just flags a valid
+   agreement as enforced (simulation-only). ``pre_act`` surfaces a validation report to
+   the game master prompt, and ``get_state``/``set_state`` checkpoint BATNAs,
+   agreements, and constraints.
+Where this fits: negotiation stage of the negotiation -> capture -> label pipeline; the
+adjudicator calls ``validate_offer`` as its terms validator, feeding the trusted event
+record that ground-truth labeling relies on.
+"""
 
 import dataclasses
 import datetime

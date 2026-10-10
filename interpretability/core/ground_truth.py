@@ -2,6 +2,30 @@
 
 This module provides utilities for extracting ground truth deception labels
 from agent behavior using rule-based, LLM-based, and DeepEval approaches.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+Two label families exist in this codebase and must never be conflated:
+`actual_deception` is third-person ground truth about what the *acting agent
+did* (produced here, by rules or judges applied to its behavior), while
+`perceived_deception` is the acting agent's own estimate about its
+*counterpart* (read from agent components by `extract_agent_labels`).
+Neither is a self-report, and one is never a substitute for the other.
+1. `GroundTruthDetector` wraps three detection routes: deterministic rules
+   (`apply_rules`), a legacy LLM evaluator (`detect_with_llm`), and DeepEval
+   G-Eval via GPT-4o-mini (`detect_with_deepeval`). DeepEval init or call
+   failure records the error and falls back to rules
+   (`_apply_rules_fallback`) rather than crashing or silently passing.
+2. `apply_rules` dispatches to the per-scenario `check_*` functions and
+   assigns tiered confidence scores by scenario: reliability differs because
+   some rules read a single stated number (ultimatum/capability/hidden
+   value) while others need committed history (info_withholding,
+   promise_break, alliance_betrayal) and return an explicit 'unavailable'
+   result — never a default "honest" — when that evidence is missing.
+3. `extract_agent_labels` pulls the perceived-deception side from agent
+   component state (theory of mind, intention/strategy trackers).
+Where this fits: the labels stage of the scenarios -> agents -> capture ->
+labels -> QC -> dataset -> probes/causal/benchmark pipeline.
 """
 
 import logging

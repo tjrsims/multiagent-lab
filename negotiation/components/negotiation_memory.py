@@ -1,4 +1,28 @@
-"""Specialized memory component for negotiation contexts."""
+"""Specialized memory component for negotiation contexts.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This component layers a structured offer/outcome history on top of Concordia's plain
+associative memory bank (a free-text store queried by similarity). No model calls here.
+1. ``Offer`` and ``NegotiationOutcome`` are the structured records; ``NegotiationMemory``
+   keeps them in lists while also mirroring a text rendering into the shared memory bank
+   via ``remember_offer`` / ``remember_outcome`` (the bank has no metadata support, so the
+   structured lists are the only queryable-by-field copy).
+2. Offers are detected heuristically: ``contains_offer`` / ``parse_offer_value`` /
+   ``signals_agreement`` (negotiation/utils/parsing.py) are keyword/regex checks over raw
+   text. Party attribution is a placeholder -- ``post_act`` records the recipient and
+   ``pre_observe`` records the offerer as the literal string 'other_party'.
+3. ``pre_act`` renders the agent-visible memory context: current summary
+   (``get_current_negotiation_summary``), success patterns, and similar past episodes
+   retrieved from the bank (``get_similar_negotiations``).
+4. ``get_state``/``set_state`` serialize the structured history for checkpoints,
+   round-tripping timestamps as ISO strings and the best offer as a list index.
+Caveat: everything here is the agent's own fallible bookkeeping to flavor its prompts.
+Ground-truth offers, agreements, and deception labels come from game_master/ and domain/,
+never from this component.
+Where this fits: negotiation stage of the negotiation -> capture -> label pipeline; its
+pre_act text shapes the captured prompts but plays no role in labeling.
+"""
 
 import dataclasses
 import datetime

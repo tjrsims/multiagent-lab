@@ -1,4 +1,36 @@
-"""Evidence-linked theory-of-mind diagnostics for negotiation agents."""
+"""Evidence-linked theory-of-mind diagnostics for negotiation agents.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+"Theory of mind" (ToM) here means the agent's model of its COUNTERPART -- estimated
+emotions, goals, trust, and perceived-deception cues. These estimates feed the
+``perceived_deception`` label family; they are never the ground truth about what the
+counterpart actually did (that comes from the game master and domain/rules.py).
+1. Data shapes first: ``EmotionalState``, ``TrustAssessment`` (explicitly "unavailable"
+   until trust evidence is seen), ``BeliefRecord`` (recursive beliefs with provenance),
+   and ``MentalModel`` (everything known about one counterpart, with its evidence).
+2. ``TheoryOfMind`` declares a ``DIAGNOSTIC_CONTRACT`` (contracts.py) promising zero
+   model calls in pre_act/post_act/pre_observe and up to 3 in post_observe.
+3. The v1 lifecycle honors that contract: ``pre_observe`` only stages the observation;
+   ``post_observe`` calls ``analyze_observation`` exactly once, which makes up to three
+   analysis model calls (``_detect_emotions``, ``_infer_goals``, ``_assess_personality``)
+   plus purely lexical deception-cue scoring calibrated against a rolling baseline
+   (``_detect_deception`` / ``_update_deception_baseline``) and cue-based trust
+   (``_assess_trust``).
+4. ``pre_act`` renders cached diagnostics (``_render_guidance``) with NO model call and
+   NO state mutation, so the acting prompt is a pure read. ``post_act`` deliberately
+   discards the agent's own action -- self-output must not contaminate counterpart beliefs.
+5. ``tom_version='v2'`` switches to the deterministic engine in components/tom/: the
+   experiment runtime attaches a per-trial ``ToMV2Engine`` via ``attach_v2_engine`` and
+   feeds it typed evidence; ``pre_act`` then renders the prepared v2 advisory and degrades
+   gracefully ("engine not attached") if none was wired up. Raw text is never analyzed
+   linguistically on the v2 path.
+6. ``get_state``/``set_state`` snapshot and restore all evidence-bearing state, including
+   legacy snapshot shapes and pending v2 snapshots captured before engine attachment.
+Where this fits: negotiation stage of the negotiation -> capture -> label pipeline; its
+cached diagnostics enter the captured acting prompt, and its counterpart estimates are the
+source of perceived (not actual) deception labels.
+"""
 
 from __future__ import annotations
 

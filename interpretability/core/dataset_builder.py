@@ -1,4 +1,32 @@
-"""Activation-dataset projection and safe JSON+NPZ serialization."""
+"""Activation-dataset projection and safe JSON+NPZ serialization.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+`DatasetBuilder` turns a run's in-memory results into the on-disk bundle
+every downstream tool consumes: stacked activation tensors per layer,
+aligned label arrays, per-row metadata, config + provenance (package
+versions, model/tokenizer identity, experiment track), the canonical
+generation/label/event/intervention records, and a locked split manifest.
+1. `_connected_split_groups` runs union-find (a disjoint-set structure that
+   merges items sharing any key) over each row's `trial_family_id` and
+   `dyad_id`, producing connected groups; the split manifest assigns whole
+   groups to train/dev/test so no trial or counterpart pair ever straddles
+   the boundary. `_derived_dyad_id` hashes the unordered participant pair
+   when no explicit dyad id exists.
+2. `_canonical_records` is the integrity gate: for every sample bound to a
+   `GenerationRecord` it *recomputes* the activation artifact references
+   (content hashes of the tensors) via `make_activation_artifact_refs` at
+   write time and refuses to serialize if they differ from what the record
+   captured — corrupted or substituted activations cannot ship.
+3. `build()` assembles the full dictionary (activations, labels, metadata,
+   sae payload, records, split projection); `save()` writes the safe
+   JSON+NPZ format by default — the legacy pickle `.pt` path is gated
+   behind an explicit `trusted_legacy=True` because unpickling untrusted
+   files can execute code. `load()` mirrors that trust gate.
+Where this fits: the dataset stage of the scenarios -> agents -> capture ->
+labels -> QC -> dataset -> probes/causal/benchmark pipeline — everything
+after this point (probes, causal, benchmark views) reads this bundle.
+"""
 
 from __future__ import annotations
 
@@ -506,6 +534,7 @@ class DatasetBuilder:
             "role_assignment_id": sample.role_assignment_id,
             "order_assignment_id": sample.order_assignment_id,
             "counterpart_assignment_id": sample.counterpart_assignment_id,
+            "counterpart_policy_id": sample.counterpart_policy_id,
             "surface_assignment_id": sample.surface_assignment_id,
             "counterbalance_id": sample.counterbalance_id,
             "first_mover_id": sample.first_mover_id,
@@ -562,6 +591,18 @@ class DatasetBuilder:
             "qc_flags": qc_flags,
             "qc_status": "passed" if not qc_flags else "rejected",
             "qc_version": QC_VERSION,
+            "claim_status": sample.claim_status,
+            "behavior_subtype": sample.behavior_subtype,
+            "label_reason_codes": list(sample.label_reason_codes),
+            "rule_version": sample.rule_version,
+            "label_source": sample.label_source,
+            "claim_values": [float(value) for value in sample.claim_values],
+            "offer_values": [float(value) for value in sample.offer_values],
+            "label_tolerance": {str(key): float(value) for key, value in (sample.label_tolerance or {}).items()},
+            "runtime_path": sample.runtime_path,
+            "pair_role": sample.pair_role,
+            "pair_anchor": sample.pair_anchor,
+            "rollout_index": sample.rollout_index,
         }
 
     def build(

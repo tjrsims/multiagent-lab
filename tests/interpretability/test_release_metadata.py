@@ -39,6 +39,8 @@ def test_schema_registry_is_stable_complete_and_json_safe() -> None:
         "probe_intervention", "response_qc", "runtime_executor",
         "schema_registry", "scripted_observation", "split_manifest",
         "simultaneous_batch", "solo_no_response_protocol", "trial_runtime",
+        "turn_label_rule", "benchmark", "benchmark_manifest", "benchmark_views",
+        "benchmark_scoring", "matched_pairs",
     }
     assert set(registry) == expected
     assert all(isinstance(value, str) and value for value in registry.values())

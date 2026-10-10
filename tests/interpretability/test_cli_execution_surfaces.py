@@ -364,6 +364,7 @@ def test_runner_text_only_selects_hf_adapter_without_white_box_construction(
 def test_text_only_study_does_not_treat_empty_activation_qc_as_failure() -> None:
     runner = object.__new__(InterpretabilityRunner)
     runner.activation_samples = []
+    runner.text_samples = []  # owned by __init__, which this fixture bypasses
     runner.experiment_track = ExperimentTrack.TEXT_ONLY
     runner.captured_actor_ids = ()
     runner._trial_id = 0
@@ -979,6 +980,7 @@ def test_completed_trial_checkpoint_omits_mismatched_runtime_envelope(
 ) -> None:
     runner = object.__new__(InterpretabilityRunner)
     runner.activation_samples = []
+    runner.text_samples = []  # owned by __init__, which this fixture bypasses
     runner.experiment_track = ExperimentTrack.SINGLE_AGENT_WHITE_BOX
     runner.captured_actor_ids = ("Negotiator", "Counterpart")
     runner._pod_id = 0

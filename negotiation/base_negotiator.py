@@ -1,4 +1,35 @@
-"""Base negotiation agent prefab with core negotiation capabilities."""
+"""Base negotiation agent prefab with core negotiation capabilities.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This file defines the standard negotiation agent as a Concordia prefab (Concordia's
+builder pattern: a dataclass whose ``build()`` assembles a complete agent entity).
+1. ``Entity`` is the prefab. Its ``params`` mapping holds plain-string settings (name,
+   goal, negotiation style, reservation value, ethics text) so agents can be configured
+   without code changes.
+2. ``Entity.build()`` wires together "context components". Each component contributes one
+   block of text to the acting prompt through its ``pre_act`` method: recent observations,
+   associative memory, negotiation instructions, structured offer memory, strategy advice,
+   and three self-reflection questions.
+3. The three ``QuestionOfRecentMemories`` components ('situation_perception',
+   'self_perception', 'action_reasoning') each make their OWN language-model call during
+   ``pre_act`` to answer their question. So a single agent action can involve several
+   auxiliary model calls before the final acting call.
+4. ``component_order`` is load-bearing: it is the exact order in which component texts are
+   concatenated into the acting prompt. Interpretability experiments capture activations
+   from the forward pass over that prompt, so reordering components changes both behavior
+   and the captured data. Never reorder casually.
+5. ``ScopedConcatActComponent`` (see ``components/scoped_act.py``) makes the final acting
+   model call that produces the agent's actual negotiation message, optionally inside a
+   caller-supplied context manager (the activation-capture hook).
+6. Passing ``ethical_constraints=''`` (empty string) omits the ETHICS prompt line entirely.
+   That is the emergent-deception research mode: the agent is neither told to be honest
+   nor told to deceive.
+Where this fits: this is the "negotiation" stage of the negotiation -> capture -> label
+pipeline. The interpretability runner builds these agents, scopes their final act call to
+capture activations, and later labels the resulting turns with ground truth from the
+game master and domain rules.
+"""
 
 from collections.abc import Mapping
 import dataclasses
@@ -57,6 +88,7 @@ class Entity(prefab_lib.Prefab):
         Returns:
             Configured negotiation agent
         """
+        # Step 1: read plain-string settings out of the prefab's params mapping.
         # Extract parameters from params dict
         agent_name = self.params.get('name', 'Negotiator')
         goal = self.params.get('goal', 'Reach a mutually beneficial agreement')
@@ -70,6 +102,8 @@ class Entity(prefab_lib.Prefab):
         )
         ethics = self.params.get('ethical_constraints', 'Be honest and fair.')
 
+        # Step 2: stock Concordia components -- associative memory plus components that
+        # write incoming observations to memory and replay the most recent ones.
         # Create memory component
         memory = agent_components.memory.AssociativeMemory(
             memory_bank=memory_bank,
@@ -84,6 +118,8 @@ class Entity(prefab_lib.Prefab):
             pre_act_label='Recent events in the negotiation:'
         )
 
+        # Step 3: negotiation-specific components (instructions, offer memory, strategy).
+        # These are deterministic -- they render text but never call the model themselves.
         # Create negotiation-specific instructions
         instructions = negotiation_instructions.NegotiationInstructions(
             agent_name=agent_name,
@@ -110,6 +146,8 @@ class Entity(prefab_lib.Prefab):
             verbose=True,
         )
 
+        # Step 4: three reflection questions. Each one makes its own model call during
+        # pre_act to answer its question; the answers become part of the acting prompt.
         # Create question components for context and reasoning
         question_about_situation = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
@@ -138,12 +176,16 @@ class Entity(prefab_lib.Prefab):
             memory_tag='[action reasoning]',
         )
 
+        # Step 5: model-assisted retrieval of memories similar to the current context
+        # (another auxiliary model call, still outside the capture scope).
         # Recent memories for context
         recent_memories = agent_components.all_similar_memories.AllSimilarMemories(
             model=model,
             num_memories_to_retrieve=10,
         )
 
+        # Step 6: register everything under stable string keys, then merge in any
+        # extra_components (this is how advanced_negotiator.py injects optional modules).
         # Assemble all components
         components_of_agent = {
             'observation_to_memory': observation_to_memory,
@@ -163,6 +205,9 @@ class Entity(prefab_lib.Prefab):
         if isinstance(extra_components, dict):
             components_of_agent.update(extra_components)
 
+        # Step 7: the prompt reading order. This list is BOTH the order the reader sees
+        # in the assembled prompt AND the input to the captured forward pass; extra
+        # (module) components are appended last. Do not reorder casually.
         # Define component order for context building
         component_order = [
             'observation_to_memory',
@@ -184,6 +229,9 @@ class Entity(prefab_lib.Prefab):
                 if name not in component_order
             ])
 
+        # Step 8: the acting component. It concatenates the ordered pre_act texts and
+        # makes the FINAL model call that produces the agent's action, optionally inside
+        # the caller's activation-capture context manager (see components/scoped_act.py).
         # Create the acting component
         action_scope_factory = self.params.get('action_call_scope_factory')
         if action_scope_factory is not None and not callable(action_scope_factory):
@@ -195,6 +243,7 @@ class Entity(prefab_lib.Prefab):
             action_scope_factory=action_scope_factory,
         )
 
+        # Step 9: bind the act component and context components into a Concordia entity.
         # Create the agent
         agent = entity_agent_with_logging.EntityAgentWithLogging(
             agent_name=agent_name,

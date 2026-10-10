@@ -1,4 +1,27 @@
-"""Declarative diagnostics contracts for optional cognitive components."""
+"""Declarative diagnostics contracts for optional cognitive components.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+Model calls made by components outside the main acting call are a confound for this
+project (activations must come from one known call), so components must DECLARE their
+model-call budget per lifecycle phase, and this file makes those declarations executable.
+1. ``ModelCallDeclaration`` is a validated [minimum, maximum] bound on model calls for
+   one lifecycle phase (pre_act / post_act / pre_observe / post_observe), with a
+   human-readable ``condition`` explaining when calls happen. ``validate`` raises if an
+   observed count falls outside the range.
+2. ``ComponentDiagnosticContract`` is the full promise a component publishes: its inputs,
+   outputs, state fields, logging fields, and an ``extra_model_calls`` mapping covering
+   all four phases (plain ints are upgraded to exact declarations, then frozen behind a
+   read-only MappingProxyType). See ``TheoryOfMind.DIAGNOSTIC_CONTRACT`` for an example.
+3. ``ModelCallDiagnosticsMixin`` is the runtime enforcement hook: components call
+   ``_record_model_call_branch`` after a conditional branch, which asserts the observed
+   count against both the contract range and the branch's own expectation, and stores the
+   result for ``get_model_call_diagnostics``.
+4. ``StatefulComponent`` is a structural Protocol: anything with a contract plus
+   ``get_state``/``set_state`` counts, no inheritance required.
+Where this fits: negotiation-stage guardrail in the negotiation -> capture -> label
+pipeline; it keeps hidden model calls from contaminating the captured activations.
+"""
 
 from __future__ import annotations
 

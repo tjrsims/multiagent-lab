@@ -33,6 +33,29 @@ Parallel Execution (3 pods):
     # Pod 1: python run_deception_experiment.py --scenario-name ultimatum_bluff
     # Pod 2: python run_deception_experiment.py --scenario-name hidden_value
     # Pod 3: python run_deception_experiment.py --scenario-name alliance_betrayal
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This file is the argparse entry point for the whole experiment; `cli.py` is the
+Click-based twin (`deception run`) — the two are equivalent front doors.
+1. `main()` parses flags, then resolves them into a frozen ExecutionSurfacePlan
+   via `resolve_execution_surface()` (or `resolve_config_execution_surface()`
+   when an authoritative `--config` JSON is given). The plan fixes the track,
+   protocol, counterpart policies, counterbalance schedule, and enabled agent
+   modules before anything heavy loads.
+2. `--parallel-pod` is rejected on purpose: offsetting trial IDs does not
+   partition the execution schedule and can overlap seed windows, so pods must
+   be partitioned explicitly by scenario/condition instead.
+3. The track manifest (`experiment_track_manifest.json`) — a full record of the
+   run design — is written to disk *before* any model loads, so even a crashed
+   run leaves an auditable record of what was attempted.
+4. `run_emergent_experiment()` / `run_instructed_experiment()` drive the
+   `InterpretabilityRunner`, which plays the negotiations and captures
+   activations (the model's internal vectors) from the acting agent.
+5. Afterwards `train_probes_on_data()` fits linear probes (simple classifiers
+   over activations) and, with `--causal`, causal validation runs.
+Where this fits: this is the outermost shell of the pipeline —
+scenarios -> agents -> capture -> labels -> QC -> dataset -> probes/causal.
 """
 
 import argparse
@@ -50,6 +73,7 @@ import torch
 from interpretability.data import load_activation_dataset
 from interpretability.tracks import ExperimentTrack, get_track_spec
 from interpretability.launch import (
+    planned_executions,
     PUBLIC_RESUME_LIMITATION,
     resolve_config_execution_surface,
     resolve_execution_surface,
@@ -937,13 +961,14 @@ def main():
         print(f"Incentive conditions: {[c.value for c in conditions]}", flush=True)
 
     emergent_condition_count = len(conditions) if conditions is not None else 2
+    planned_emergent = planned_executions(
+        execution_plan,
+        scenarios=emergent_scenarios,
+        conditions=emergent_condition_count,
+        families_per_scenario_condition=args.trials,
+    )
     estimated_emergent_executions = (
-        len(emergent_scenarios)
-        * args.trials
-        * emergent_condition_count
-        * execution_plan.executions_per_family
-        if args.mode in {"emergent", "both"}
-        else 0
+        planned_emergent["total"] if args.mode in {"emergent", "both"} else 0
     )
     estimated_instructed_executions = (
         len(instructed_scenarios) * args.trials * 2
@@ -953,6 +978,7 @@ def main():
     track_manifest.update({
         'semantic_families_per_scenario_condition': args.trials,
         'executions_per_family': execution_plan.executions_per_family,
+        'executions_per_scenario': planned_emergent['per_scenario'],
         'estimated_emergent_executions': estimated_emergent_executions,
         'estimated_instructed_legacy_executions': (
             estimated_instructed_executions

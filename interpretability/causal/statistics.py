@@ -1,4 +1,28 @@
-"""Paired family/dyad-clustered uncertainty for causal outcomes."""
+"""Paired family/dyad-clustered uncertainty for causal outcomes.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+Turns from the same trial family or dyad are correlated, so pretending each
+row is an independent observation would shrink error bars and manufacture
+significance. This module makes cluster-aware inference the only option.
+1. `ClusteredPairedEstimate` is the result record: effect, bootstrap
+   confidence interval, permutation p-value, and full provenance (cluster
+   unit, counts, seed, alpha).
+2. `paired_clustered_estimate` computes a paired baseline-vs-intervention
+   effect in three cluster-respecting steps:
+   - within-cluster averaging: per-row differences are first averaged
+     inside each cluster, so every cluster contributes exactly one number;
+   - cluster bootstrap: clusters (not rows) are resampled with replacement
+     to build the confidence interval;
+   - sign-flip permutation: each cluster's effect keeps or flips its sign
+     at random to form the null distribution for the p-value.
+3. Guard rails: `cluster_unit` naming any row-level unit ("row", "sample",
+   "turn", ...) is rejected outright, cluster IDs must be present and
+   well-formed, and at least three independent clusters are required.
+Where this fits: the causal stage of the scenarios -> agents -> capture ->
+labels -> QC -> dataset -> probes/causal/benchmark pipeline — the
+uncertainty engine behind causal_validation.py's intervention effects.
+"""
 
 from __future__ import annotations
 

@@ -3,6 +3,30 @@
 Actor-visible observations are deliberately separate from adjudicator-only
 policy truth.  The scripted policies expose finite, inspectable action
 distributions and never call a language model or mutate process-global RNG.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+Counterpart policies are scripted (rule-based, no LLM) behaviors for the
+agent's negotiation partner; runs cross them as experimental conditions so
+we can ask "does the deceiver behave differently against a skeptic?".
+1. `PolicyHypothesis` names the finite condition set used across the
+   experiments: default, skeptical, credulous, informed (a counterpart
+   granted specific actor-private facts), and absent (no counterpart at
+   all — the solo protocol).
+2. `PolicyAction`, `ObservationAccess`, and `VerificationStatus` define the
+   finite vocabularies of moves, visibility levels, and claim-verification
+   states a scripted counterpart can use.
+3. `PublicObservation` is the *only* information a controlled counterpart
+   sees; `AdjudicatorPolicyTruth` keeps the policy's identity out of every
+   actor-visible observation, so the studied agent cannot read the
+   condition off its partner's prompt.
+4. `ThresholdRationalPolicy`, `VerificationSensitivePolicy`, and
+   `AbsentPolicy` are the executable policies (all satisfy the
+   `ExecutableCounterpartPolicy` protocol); each maps an observation to an
+   inspectable `ActionDistribution` deterministically from seeded material.
+Where this fits: scenarios-stage machinery in the scenarios -> agents ->
+capture -> labels -> QC -> dataset -> probes/causal/benchmark pipeline; the
+runtime crosses these policies into the counterbalance schedule.
 """
 
 from __future__ import annotations

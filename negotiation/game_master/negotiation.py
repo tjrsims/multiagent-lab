@@ -12,7 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A prefab containing a negotiation game master."""
+"""A prefab containing a negotiation game master.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+The "game master" (GM) is Concordia's referee entity: it narrates what each agent
+observes, decides who acts next, and resolves what actually happened. This file builds
+that GM for two-party negotiations -- and pairs it with a deterministic adjudicator.
+1. ``NegotiationGameMaster.build`` validates params: only the alternating protocol is
+   supported (simultaneous batches belong to EmergentTrialExecutor), GM module names must
+   exist in the registry, and exactly two uniquely-named entities are required.
+2. It then wires the LLM-backed GM components: instructions, player roster, memory and
+   observation history, ``NegotiationStateTracker`` (gm_state.py) and
+   ``NegotiationValidator`` (gm_validation.py), ``MakeObservation`` (narrates each
+   player's view via model calls), ``NextActingInFixedOrder`` (alternating turn order),
+   ``NextActionSpec``, and ``EventResolution`` (model-driven "what really happened"
+   chain-of-thought steps).
+3. It also constructs a ``NegotiationAdjudicator`` (adjudication.py) -- a deterministic,
+   model-free scorekeeper. Note the ``component_order`` list: the adjudicator is
+   deliberately EXCLUDED from prompt assembly and the pre_act order; callers reach it
+   out-of-band through its ``submit()`` method, not through the LLM loop.
+   Why both exist: the narrative GM produces naturalistic observations but, being an LLM,
+   can itself be persuaded or deceived by agents; the adjudicator provides trustworthy
+   ground-truth state and legality no prompt can influence.
+4. ``build_game_master`` is the keyword wrapper (with module auto-detection);
+   ``build_bilateral_negotiation``, ``build_multilateral_negotiation``,
+   ``build_cultural_negotiation``, and ``build_adaptive_negotiation`` are preset bundles.
+Where this fits: negotiation stage of the negotiation -> capture -> label pipeline; the
+adjudicator's deterministic record is what downstream ground-truth (actual_deception)
+labeling trusts, never the LLM narration.
+"""
 
 from collections.abc import Mapping, Sequence
 import copy

@@ -1,4 +1,28 @@
-"""Negotiation-specific instructions component."""
+"""Negotiation-specific instructions component.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+This component writes the agent's persona, goal, style, and phase guidance into every
+acting prompt. It is pure string templating -- it never calls a language model.
+1. ``NegotiationInstructions.__init__`` validates the style and reservation value (BATNA:
+   the fallback value below which no deal is acceptable), then caches
+   ``_generate_base_instructions()``: persona line, goal, style, reservation value, and
+   style-specific bullet guidance (cooperative / competitive / integrative).
+2. The ethics line is the emergent-deception knob: ``ethical_constraints=None`` gets the
+   default "Be honest and fair" text, but an explicit empty string omits the ETHICS line
+   entirely -- deception can then emerge from incentives without being forbidden or invited.
+3. ``pre_act`` derives the phase from ``_rounds_completed`` (opening < 3 rounds,
+   middle < 10, closing after), appends ``get_phase_specific_guidance()``, echoes the last
+   offers seen, and adds one style-matched tactical reminder.
+4. ``post_act`` bumps the round counter after every action and remembers the agent's last
+   text containing "offer"; ``pre_observe`` does the same for offers received. These are
+   coarse heuristics for prompt flavor, not ground truth.
+5. ``get_state``/``set_state`` round-trip the phase/round/offer state (also accepting a
+   legacy "phase|rounds" pipe string) for checkpointing.
+Where this fits: negotiation stage of the negotiation -> capture -> label pipeline; its
+pre_act text is part of the prompt whose acting-model call is captured, so the presence or
+absence of the ETHICS line is an experimental condition, not a cosmetic detail.
+"""
 
 import logging
 import math
@@ -142,6 +166,8 @@ class NegotiationInstructions(entity_component.ContextComponent):
 
     def pre_act(self, action_spec) -> str:
         """Provide negotiation instructions before action."""
+        # Step 1: derive the phase from how many actions this agent has taken. Note the
+        # counter is bumped in post_act, so the phase reflects completed rounds.
         # Update phase based on rounds
         if self._rounds_completed < 3:
             self._negotiation_phase = 'opening'
@@ -150,6 +176,7 @@ class NegotiationInstructions(entity_component.ContextComponent):
         else:
             self._negotiation_phase = 'closing'
 
+        # Step 2: assemble cached base text + phase guidance, then situational lines.
         # Build contextual instructions
         instructions = self._base_instructions
         instructions += self.get_phase_specific_guidance()
@@ -163,6 +190,7 @@ class NegotiationInstructions(entity_component.ContextComponent):
         if self._last_offer_made:
             instructions += f'\nYOUR LAST OFFER: {self._last_offer_made}\n'
 
+        # Step 3: close with one tactical reminder matched to the configured style.
         # Add tactical reminders
         instructions += '\nREMEMBER:\n'
         if self._style == 'cooperative':

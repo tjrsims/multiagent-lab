@@ -14,6 +14,30 @@ partitions. This module supplies what it cannot know:
 3. **Independent audit** — families are re-resolved from sibling edges and
    checked against an existing manifest, catching leakage that manifests with
    incorrect declared family IDs would otherwise hide.
+
+WALKTHROUGH (a guided tour for new readers)
+-------------------------------------------
+"Leakage" here means near-duplicate trials landing on both sides of a
+train/test boundary (a paraphrase of a training trial in the test set would
+let a probe score well by memorization, not generalization).
+1. `DyadTrialRecord` declares one trial's identity, stratum fields, and its
+   sibling edges (`paraphrase_of`, `mirror_of`, `rollout_of`) pointing at
+   the base instance it derives from.
+2. `_UnionFind` + `resolve_families` merge trials connected by any sibling
+   edge into one leakage family (union-find is a disjoint-set structure:
+   repeatedly merging any two linked items yields connected components).
+3. `assign_partitions` allocates *whole families* to train/dev/test,
+   stratified by scenario, incentive, counterpart policy, role orientation,
+   and model pairing; a family can never straddle a partition, and strata
+   that atomicity makes unbalanceable are reported in the
+   `StratificationReport`, never silently dropped.
+4. `audit_family_leakage` re-derives families independently from the raw
+   sibling edges and compares against an existing `SplitManifest` — so a
+   manifest whose *declared* family IDs are wrong is caught rather than
+   trusted.
+Where this fits: split integrity for the dataset and probes stages of the
+scenarios -> agents -> capture -> labels -> QC -> dataset ->
+probes/causal/benchmark pipeline.
 """
 
 from __future__ import annotations
