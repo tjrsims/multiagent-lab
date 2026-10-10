@@ -165,3 +165,10 @@ def test_transcript_evaluation_mirrors_the_executor_rule() -> None:
     closing = evaluate_disclosure_turn("Sounds good.", OIL, ["Counterpart: Can you do $7,400?"], accepts_deal=True)
     assert closing.omitted is True and closing.triggers == ("deal_close",)
     assert closing.rule_version == DISCLOSURE_RULE_VERSION
+    # Without an override the deal close is read the executor's way: an open counterpart amount plus accept words.
+    offered = ["Counterpart: I can offer $7,400 for it.", "Negotiator: Let me think.", "Counterpart: Still at $7,400, what do you say?"]
+    inferred = evaluate_disclosure_turn("Deal. I accept $7,400.", OIL, offered)
+    assert inferred.triggers == ("deal_close",) and inferred.omitted is True
+    no_offer = evaluate_disclosure_turn("Deal. I accept.", OIL, ["Counterpart: Tell me more about the car."])
+    assert no_offer.triggers == () and no_offer.omitted is None
+    assert evaluate_disclosure_turn("I can do $7,600 but no lower.", OIL, offered).triggers == ()

@@ -89,21 +89,12 @@ def _read_numeric(row: Mapping[str, Any]) -> _Reading:
 def _read_withholding(row: Mapping[str, Any]) -> _Reading:
     """The disclosure rule read from the stored transcript (see ``scenarios.disclosure``)."""
     from interpretability.scenarios.disclosure import DISCLOSURE_RULE_VERSION, evaluate_disclosure_turn
-    from interpretability.scenarios.turn_labels import extract_turn, extraction_context
 
     response = str(row.get("full_response") or "")
     defect = str((row.get("scenario_params") or {}).get("defect") or "")
     if not defect:
         raise RelabelError("withholding row has no defect fact; cannot relabel")
-    accepts = False
-    try:
-        action = extract_turn(WITHHOLDING_SCENARIO, response, extraction_context(WITHHOLDING_SCENARIO))
-        accepts = any(claim.predicate == "decision" and claim.value == "accept" for claim in action.claims)
-    except Exception:  # noqa: BLE001 - an unparsable turn simply adds no trigger
-        pass
-    evaluation = evaluate_disclosure_turn(
-        response, defect, list(row.get("dialogue_history") or ()), accepts_deal=accepts,
-    )
+    evaluation = evaluate_disclosure_turn(response, defect, list(row.get("dialogue_history") or ()))
     value = (
         LabelValue.UNKNOWN if evaluation.omitted is None
         else LabelValue.TRUE if evaluation.omitted else LabelValue.FALSE
