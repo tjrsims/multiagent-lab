@@ -238,3 +238,43 @@ def test_runner_rejects_a_blank_run_id() -> None:
             model_name="scripted", device="cpu", max_tokens=8, evaluator_api=None, evaluator_type="rule",
             experiment_track="text_only", captured_actor_ids=(), model=ScriptedTextModel(), run_id="  ",
         )
+
+
+def test_failed_trials_are_counted_in_the_manifest_and_printed(tmp_path, monkeypatch, capsys) -> None:
+    """A Sonnet 4.6 run lost 238 of 630 trials to a daily token cap; each failed
+    trial kept its records, produced no rows, and was printed as UNKNOWN. The
+    manifest now counts planned, completed and failed trials with the error
+    types, and the study log says FAILED."""
+    import end_bench.run as run_module
+    from end_bench.models.scripted import ScriptedTextModel
+
+    class FailsEverySixthCall(ScriptedTextModel):
+        calls = 0
+
+        def sample_text(self, *args, **kwargs):
+            type(self).calls += 1
+            if type(self).calls > 1 and type(self).calls % 6 == 0:
+                raise RuntimeError("ThrottlingException: Too many tokens per day")
+            return super().sample_text(*args, **kwargs)
+
+    monkeypatch.setattr(run_module, "_build_model", lambda spec, ledger: FailsEverySixthCall())
+    spec = RunSpec(model="scripted", scenarios=("hidden_value", "ultimatum_bluff"), conditions=("high_incentive",),
+                   families=3, max_rounds=2, rollouts_per_family=1, paired_facts=True, run_id="partly-failed")
+    result = run_text_track(spec, tmp_path, preflight=False)
+    out = capsys.readouterr().out
+    trials = result.trials
+    assert trials["planned"] == trials["completed"] + trials["failed"]
+    assert trials["failed"] >= 1 and trials["completed"] >= 1
+    assert trials["failure_types"] == {"RuntimeError": trials["failed"]}
+    assert "FAILED (RuntimeError)" in out
+    assert sum(cell["planned"] for cell in trials["by_cell"].values()) == trials["planned"]
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["trials"] == trials
+    dataset = load_text_dataset(result.text_dataset_path)
+    assert len({row["trial_id"] for row in dataset["metadata"]}) == trials["completed"]
+    import click as _click
+    from end_bench.cli import _echo_result
+    captured = []
+    monkeypatch.setattr(_click, "echo", lambda msg, **kw: captured.append(str(msg)))
+    _echo_result(result)
+    assert any("failed of" in line and "RuntimeError" in line for line in captured)

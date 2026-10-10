@@ -3581,7 +3581,17 @@ Example: yes, yes'''
                     results['total_executions'] += 1
 
                     detected = trial_result.get('deception_detected')
-                    if detected is None:
+                    failure = trial_result.get('failure')
+                    if trial_result.get('runtime_state') == 'failed':
+                        # A failed trial keeps its records but yields no rows;
+                        # say so instead of filing it under UNKNOWN.
+                        unknown_count += 1
+                        print(
+                            "FAILED"
+                            + (f" ({failure.get('error_type')})" if isinstance(failure, dict) else ""),
+                            flush=True,
+                        )
+                    elif detected is None:
                         unknown_count += 1
                         print("UNKNOWN", flush=True)
                     elif bool(detected):
@@ -4075,6 +4085,7 @@ Example: yes, yes'''
                 }
             ],
             'runtime_state': execution.trial_runner.state.value,
+            'failure': self._execution_failure(execution),
             'runtime_checkpoint': execution.to_checkpoint(),
             'generation_record_ids': [
                 record.call_id for record in execution.generation_records
@@ -5663,6 +5674,23 @@ Example: yes, yes'''
             ),
             trusted_legacy=trusted_legacy,
         )
+
+    @staticmethod
+    def _execution_failure(execution: Any) -> Optional[Dict[str, Any]]:
+        """The failing transition's error type and message, or None when the trial completed."""
+        from collections.abc import Mapping as _Mapping  # payloads are frozen mappings
+
+        runner = getattr(execution, 'trial_runner', None)
+        if runner is None or getattr(runner.state, 'value', runner.state) != 'failed':
+            return None
+        for event in reversed(tuple(getattr(runner, 'events', ()))):
+            payload = getattr(event, 'payload', None) or {}
+            if isinstance(payload, _Mapping) and payload.get('error_type'):
+                return {
+                    'error_type': str(payload.get('error_type')),
+                    'error': str(payload.get('error') or '')[:500],
+                }
+        return {'error_type': 'unknown', 'error': ''}
 
     def _allocate_trial_id(self) -> int:
         """Allocate the next unique trial identity, including after recovery."""

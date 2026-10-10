@@ -84,6 +84,14 @@ def _spec_from_options(model, **options):
 def _echo_result(result) -> None:
     click.echo(click.style(f"run {result.run_id} complete", fg='green', bold=True))
     click.echo(f"  rows: {result.n_rows}")
+    trials = getattr(result, "trials", None) or {}
+    if trials:
+        line = f"  trials: {trials.get('completed')} completed, {trials.get('failed')} failed of {trials.get('planned')} planned"
+        if trials.get("failed"):
+            types = ", ".join(f"{k}={v}" for k, v in (trials.get("failure_types") or {}).items())
+            click.echo(click.style(f"{line}  ({types})", fg='yellow'))
+        else:
+            click.echo(line)
     totals = result.cost_totals
     usd = totals.get("usd")
     click.echo(

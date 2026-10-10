@@ -116,6 +116,46 @@ def _build_model(spec: RunSpec, ledger: CostLedger):
     )
 
 
+def summarize_trials(results: Mapping[str, Any]) -> dict[str, Any]:
+    """Planned, completed and failed trial counts from the study results, with failure types.
+
+    A failed trial keeps its generation records but produces no dataset rows, so
+    a dataset can look complete while whole blocks are missing. The manifest
+    therefore states the counts and the error types explicitly.
+    """
+    planned = completed = failed = 0
+    failure_types: dict[str, int] = {}
+    by_cell: dict[str, dict[str, int]] = {}
+    for scenario, block in (results or {}).items():
+        conditions = block.get("conditions") if isinstance(block, Mapping) else None
+        if not isinstance(conditions, Mapping):
+            continue
+        for condition, payload in conditions.items():
+            trials = payload.get("trials") if isinstance(payload, Mapping) else None
+            if not isinstance(trials, list):
+                continue
+            cell = by_cell.setdefault(f"{scenario}/{condition}", {"planned": 0, "completed": 0, "failed": 0})
+            for trial in trials:
+                planned += 1
+                cell["planned"] += 1
+                if trial.get("runtime_state") == "failed":
+                    failed += 1
+                    cell["failed"] += 1
+                    failure = trial.get("failure") or {}
+                    key = str(failure.get("error_type") or "unknown") if isinstance(failure, Mapping) else "unknown"
+                    failure_types[key] = failure_types.get(key, 0) + 1
+                else:
+                    completed += 1
+                    cell["completed"] += 1
+    return {
+        "planned": planned,
+        "completed": completed,
+        "failed": failed,
+        "failure_types": dict(sorted(failure_types.items())),
+        "by_cell": by_cell,
+    }
+
+
 @dataclass(frozen=True)
 class RunResult:
     run_id: str
@@ -126,6 +166,7 @@ class RunResult:
     n_rows: int
     cost_totals: Mapping[str, Any]
     results: Mapping[str, Any] = field(repr=False)
+    trials: Mapping[str, Any] = field(default_factory=dict)
 
 
 def run_text_track(
@@ -256,6 +297,7 @@ def run_text_track(
     dataset_path = save_text_dataset(target / "text_dataset.json", dataset)
     results_path = target / "results.json"
     results_path.write_text(json.dumps(results, indent=2, sort_keys=True, default=str))
+    trial_summary = summarize_trials(results)
     manifest = {
         **manifest_head,
         "finished_at": time.time(),
@@ -263,6 +305,7 @@ def run_text_track(
         "n_rows": len(dataset["metadata"]),
         "dataset_hash": dataset["config"]["dataset_hash"],
         "text_dataset": dataset_path.name,
+        "trials": trial_summary,
     }
     manifest_path = target / "run_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True, default=str))
@@ -273,6 +316,7 @@ def run_text_track(
         manifest_path=manifest_path,
         results_path=results_path,
         n_rows=len(dataset["metadata"]),
+        trials=trial_summary,
         cost_totals=totals,
         results=results,
     )
