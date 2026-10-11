@@ -25,6 +25,7 @@ specs, labels, QC, and benchmark views apply downstream.
 from __future__ import annotations
 
 import random
+from collections import deque
 import time
 from typing import Any, Callable, Mapping, Sequence
 
@@ -53,6 +54,29 @@ RETRYABLE_EXCEPTION_NAMES = frozenset({
 
 class BedrockGenerationError(RuntimeError):
     """Raised when a Converse call cannot be completed after retries."""
+
+
+# Bedrock's hidden account level daily token cap answers with a
+# ThrottlingException whose message says "Too many tokens per day". That is
+# not a transient blip: short retries burn out within minutes and the trial
+# fails, which silently removed 238 of 630 trials from a live Sonnet 4.6 run.
+DAILY_CAP_MARKERS = ("per day",)
+
+
+def _error_message(exc: BaseException) -> str:
+    response = getattr(exc, "response", None)
+    if isinstance(response, Mapping):
+        error = response.get("Error")
+        if isinstance(error, Mapping) and error.get("Message") is not None:
+            return str(error.get("Message"))
+    return str(exc)
+
+
+def _is_daily_cap(exc: BaseException) -> bool:
+    if not _is_retryable(exc):
+        return False
+    message = _error_message(exc).lower()
+    return any(marker in message for marker in DAILY_CAP_MARKERS)
 
 
 def _error_code(exc: BaseException) -> str | None:
@@ -108,6 +132,10 @@ class BedrockTextModel(language_model.LanguageModel):
         read_timeout_seconds: float = 120.0,
         sleep: Callable[[float], None] = time.sleep,
         rng: random.Random | None = None,
+        daily_cap_backoff_seconds: float = 900.0,
+        daily_cap_max_wait_seconds: float = 6 * 3600.0,
+        token_budget_per_day: int | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         if not isinstance(model_id, str) or not model_id.strip():
             raise ValueError("model_id must be a non-empty string")
@@ -119,6 +147,10 @@ class BedrockTextModel(language_model.LanguageModel):
             raise ValueError("top_p must be within (0, 1]")
         if type(max_retries) is not int or max_retries < 0:
             raise ValueError("max_retries must be a non-negative integer")
+        if not (float(daily_cap_backoff_seconds) > 0 and float(daily_cap_max_wait_seconds) >= 0):
+            raise ValueError("daily cap backoff must be positive and the max wait non-negative")
+        if token_budget_per_day is not None and (type(token_budget_per_day) is not int or token_budget_per_day < 1):
+            raise ValueError("token_budget_per_day must be a positive integer when given")
         self.model_id = model_id.removeprefix("bedrock:")
         self.region = region
         self.default_max_tokens = max_tokens
@@ -138,6 +170,17 @@ class BedrockTextModel(language_model.LanguageModel):
         self.max_retries = max_retries
         self.backoff_base = float(backoff_base_seconds)
         self.backoff_cap = float(backoff_cap_seconds)
+        # Daily cap handling: wait in long steps instead of failing the trial.
+        self.daily_cap_backoff = float(daily_cap_backoff_seconds)
+        self.daily_cap_max_wait = float(daily_cap_max_wait_seconds)
+        self.daily_cap_waits = 0
+        self.daily_cap_wait_seconds = 0.0
+        # Optional pacing under a known cap: a sliding 24 hour window of tokens.
+        self.token_budget_per_day = token_budget_per_day
+        self._clock = clock
+        self._token_window: deque[tuple[float, int]] = deque()
+        self.budget_waits = 0
+        self.budget_wait_seconds = 0.0
         self._sleep = sleep
         self._rng = rng or random.Random(0)
         self._call_count = 0
@@ -191,10 +234,25 @@ class BedrockTextModel(language_model.LanguageModel):
         if self.system_prompt:
             request["system"] = [{"text": self.system_prompt}]
         attempt = 0
+        waited_for_cap = 0.0
         while True:
             try:
                 return self._client_or_default().converse(**request), attempt
             except Exception as exc:  # noqa: BLE001 - classified below
+                if _is_daily_cap(exc):
+                    if waited_for_cap >= self.daily_cap_max_wait:
+                        self.failed_calls += 1
+                        self.last_error = f"{type(exc).__name__}: {_error_message(exc)}"
+                        raise BedrockGenerationError(
+                            f"Bedrock converse failed for {self.model_id}: the daily token cap "
+                            f"did not lift within {self.daily_cap_max_wait:.0f}s: {_error_message(exc)}"
+                        ) from exc
+                    delay = self.daily_cap_backoff * (0.75 + 0.5 * self._rng.random())  # jitter [0.75, 1.25)
+                    self.daily_cap_waits += 1
+                    self.daily_cap_wait_seconds += delay
+                    waited_for_cap += delay
+                    self._sleep(delay)
+                    continue  # a cap wait does not count against the short retries
                 if not _is_retryable(exc) or attempt >= self.max_retries:
                     self.failed_calls += 1
                     self.last_error = f"{type(exc).__name__}: {exc}"
@@ -206,6 +264,24 @@ class BedrockTextModel(language_model.LanguageModel):
                 delay = delay * (0.5 + self._rng.random())  # jitter in [0.5, 1.5)
                 self._sleep(delay)
                 attempt += 1
+
+    def _respect_token_budget(self) -> None:
+        """Sleep until the last 24 hours of usage fall under ``token_budget_per_day``."""
+        budget = self.token_budget_per_day
+        if budget is None:
+            return
+        window = 24 * 3600.0
+        while True:
+            now = self._clock()
+            while self._token_window and self._token_window[0][0] <= now - window:
+                self._token_window.popleft()
+            used = sum(tokens for _, tokens in self._token_window)
+            if used < budget or not self._token_window:
+                return
+            wait = max(1.0, self._token_window[0][0] + window - now)
+            self.budget_waits += 1
+            self.budget_wait_seconds += wait
+            self._sleep(wait)
 
     @staticmethod
     def _extract_text(response: Mapping[str, Any]) -> str:
@@ -244,6 +320,8 @@ class BedrockTextModel(language_model.LanguageModel):
         effective_temperature = min(max(effective_temperature, 0.0), 1.0)
         requested_top_p = float(top_p) if top_p is not None else (self.default_top_p if self.default_top_p is not None else 1.0)
         effective_top_p = None if self.anthropic else (float(top_p) if top_p is not None else self.default_top_p)  # None omits topP
+        self._respect_token_budget()
+        cap_waits_before = self.daily_cap_waits
         started = time.monotonic()
         response, retries = self._converse(
             prompt,
@@ -298,6 +376,9 @@ class BedrockTextModel(language_model.LanguageModel):
         provenance["usage"] = dict(self._last_usage)
         provenance["stop_reason"] = stop_reason
         provenance["retries"] = retries
+        provenance["daily_cap_waits"] = self.daily_cap_waits - cap_waits_before
+        provenance["token_budget_per_day"] = self.token_budget_per_day
+        self._token_window.append((self._clock(), input_tokens + output_tokens))
         self._last_sampling_config = provenance
 
         record = _publish_scoped_generation(

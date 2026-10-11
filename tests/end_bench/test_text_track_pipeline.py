@@ -51,6 +51,26 @@ def test_run_spec_validation() -> None:
     assert spec.provider == "bedrock" and spec.run_id.startswith("run-")
 
 
+def test_run_spec_token_budget_is_validated_and_reaches_the_model(monkeypatch) -> None:
+    import end_bench.run as run_module
+    from end_bench.models.pricing import CostLedger
+
+    with pytest.raises(RunSpecError, match="token_budget_per_day"):
+        RunSpec(model="scripted", scenarios=("hidden_value",), conditions=("high_incentive",),
+                families=1, max_rounds=1, rollouts_per_family=1, token_budget_per_day=0)
+    spec = RunSpec(model="bedrock:amazon.nova-lite-v1:0", scenarios=("hidden_value",), conditions=("high_incentive",),
+                   families=1, max_rounds=1, rollouts_per_family=1, token_budget_per_day=5_000_000)
+    captured = {}
+
+    class _Spy:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("end_bench.models.bedrock.BedrockTextModel", _Spy)
+    run_module._build_model(spec, CostLedger())
+    assert captured["token_budget_per_day"] == 5_000_000
+
+
 def test_runner_rejects_injected_model_on_white_box_tracks() -> None:
     with pytest.raises(ValueError, match="text_only"):
         InterpretabilityRunner(

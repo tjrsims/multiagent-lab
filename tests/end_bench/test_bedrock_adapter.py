@@ -219,3 +219,80 @@ def test_anthropic_models_get_temperature_only_and_others_keep_top_p() -> None:
     explicit = Capture()
     BedrockTextModel("global.anthropic.claude-sonnet-4-6", client=explicit, top_p=0.8).sample_text("hi", top_p=0.8)
     assert "topP" not in explicit.requests[0]["inferenceConfig"]  # never sent, even when asked for
+
+
+class _DailyCapError(Exception):
+    def __init__(self):
+        super().__init__("ThrottlingException")
+        self.response = {"Error": {"Code": "ThrottlingException",
+                                   "Message": "Too many tokens per day, please wait before trying again."}}
+
+
+class _CapThenRecover(FakeConverseClient):
+    def __init__(self, cap_hits, **kwargs):
+        super().__init__(**kwargs)
+        self.cap_hits = cap_hits
+
+    def converse(self, **request):
+        if self.cap_hits:
+            self.cap_hits -= 1
+            self.requests.append(request)
+            raise _DailyCapError()
+        return super().converse(**request)
+
+
+def test_daily_cap_throttling_waits_long_instead_of_failing_the_call() -> None:
+    sleeps = []
+    client = _CapThenRecover(2)
+    model = BedrockTextModel("global.anthropic.claude-sonnet-4-6", client=client, sleep=sleeps.append,
+                             max_retries=2, daily_cap_backoff_seconds=900.0)
+    assert model.sample_text("p") == "My minimum is 60 points."
+    assert len(client.requests) == 3
+    assert len(sleeps) == 2 and all(675 <= s <= 1125 for s in sleeps), "long waits, not the 30 second schedule"
+    assert model.daily_cap_waits == 2 and model.daily_cap_wait_seconds == pytest.approx(sum(sleeps))
+    config = model.get_last_sampling_config()
+    assert config["retries"] == 0, "cap waits do not count against the short retries"
+    assert config["daily_cap_waits"] == 2
+    assert model.failed_calls == 0 and model.cost_ledger.calls == 1
+
+
+def test_daily_cap_wait_has_a_ceiling() -> None:
+    client = _CapThenRecover(5)
+    model = BedrockTextModel("global.anthropic.claude-sonnet-4-6", client=client, sleep=lambda s: None,
+                             daily_cap_backoff_seconds=900.0, daily_cap_max_wait_seconds=1000.0)
+    with pytest.raises(BedrockGenerationError, match="daily token cap"):
+        model.sample_text("p")
+    assert len(client.requests) == 2, "one wait of about 900s, then the second hit exceeds the ceiling"
+    assert model.failed_calls == 1 and "per day" in model.last_error
+
+
+def test_plain_throttling_keeps_the_short_schedule() -> None:
+    sleeps = []
+    client = FakeConverseClient(fail_codes=["ThrottlingException"])
+    model = BedrockTextModel("amazon.nova-lite-v1:0", client=client, sleep=sleeps.append)
+    model.sample_text("p")
+    assert len(sleeps) == 1 and sleeps[0] <= 30 and model.daily_cap_waits == 0
+
+
+def test_token_budget_paces_calls_under_a_rolling_daily_window() -> None:
+    now = [1_000_000.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    client = FakeConverseClient(usage=(1200, 40))  # 1,240 tokens per call
+    model = BedrockTextModel("global.anthropic.claude-sonnet-4-6", client=client, sleep=sleep,
+                             clock=lambda: now[0], token_budget_per_day=2000)
+    model.sample_text("one")
+    now[0] += 60
+    model.sample_text("two")  # 1,240 used, under budget, allowed; 2,480 after
+    assert sleeps == []
+    now[0] += 60
+    model.sample_text("three")  # 2,480 used: wait until the first call leaves the 24h window
+    assert len(sleeps) == 1 and sleeps[0] == pytest.approx(24 * 3600 - 120)
+    assert model.budget_waits == 1 and len(client.requests) == 3
+    assert model.get_last_sampling_config()["token_budget_per_day"] == 2000
+    with pytest.raises(ValueError, match="token_budget_per_day"):
+        BedrockTextModel("amazon.nova-lite-v1:0", client=client, token_budget_per_day=0)

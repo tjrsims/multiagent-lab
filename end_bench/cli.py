@@ -50,6 +50,8 @@ def _common_design_options(f):
     f = click.option('--family-seed-start', type=click.IntRange(min=0), default=0, show_default=True)(f)
     f = click.option('--run-id', default="", help='Run identifier (default: timestamp).')(f)
     f = click.option('--out', 'out_dir', type=click.Path(file_okay=False), default="runs", show_default=True)(f)
+    f = click.option('--token-budget-per-day', type=click.IntRange(min=1), default=None,
+                     help='Pace the model under a daily token cap (tokens per rolling 24 hours).')(f)
     return f
 
 
@@ -74,6 +76,7 @@ def _spec_from_options(model, **options):
             temperature=options.get("temperature", 0.7),
             region=options.get("region", "us-east-1"),
             run_id=options["run_id"],
+            token_budget_per_day=options.get("token_budget_per_day"),
             price_table=options.get("price_table"),
             family_seed_start=options["family_seed_start"],
         )
@@ -462,7 +465,9 @@ def module():
 @click.option('--run-id', default="", help="Run id prefix (default: timestamp).")
 @click.option('--out', 'out_dir', type=click.Path(file_okay=False), default="runs", show_default=True)
 @click.option('--region', default="us-east-1", show_default=True)
-def module_run(name, model, preset, counterpart_types, run_id, out_dir, region):
+@click.option('--token-budget-per-day', type=click.IntRange(min=1), default=None,
+              help='Pace the model under a daily token cap (tokens per rolling 24 hours, per process).')
+def module_run(name, model, preset, counterpart_types, run_id, out_dir, region, token_budget_per_day):
     """Run one preset of a module, once per counterpart policy."""
     import dataclasses
     import time as _time
@@ -477,7 +482,7 @@ def module_run(name, model, preset, counterpart_types, run_id, out_dir, region):
     failures: list[tuple[str, str]] = []
     for policy in counterpart_types:
         spec = package.PRESETS[preset](model, counterpart_type=policy, run_id=f"{prefix}-{preset}-{policy}")
-        spec = dataclasses.replace(spec, region=region)
+        spec = dataclasses.replace(spec, region=region, token_budget_per_day=token_budget_per_day)
         try:
             result = run_text_track(spec, out_dir, module=benchmark)
         except RunSpecError as error:

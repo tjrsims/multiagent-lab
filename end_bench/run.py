@@ -69,6 +69,9 @@ class RunSpec:
     # (interpretability.runtime.attestation); a module may force this on.
     closing_attestation: bool = False
     attestation_timing: str = "closing"
+    # Pace the model under a known daily token cap (Bedrock's hidden account
+    # level limit); None sends as fast as the request quota allows.
+    token_budget_per_day: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model.strip():
@@ -85,6 +88,10 @@ class RunSpec:
                 raise RunSpecError(f"{name} must be a positive integer")
         if self.ultrafast and self.agent_modules:
             raise RunSpecError("ultrafast agents take no optional modules")
+        if self.token_budget_per_day is not None and (
+            type(self.token_budget_per_day) is not int or self.token_budget_per_day < 1
+        ):
+            raise RunSpecError("token_budget_per_day must be a positive integer when given")
         if not self.run_id:
             object.__setattr__(self, "run_id", f"run-{time.strftime('%Y%m%d-%H%M%S')}")
 
@@ -110,6 +117,7 @@ def _build_model(spec: RunSpec, ledger: CostLedger):
             max_tokens=spec.max_tokens,
             temperature=spec.temperature,
             cost_ledger=ledger,
+            token_budget_per_day=spec.token_budget_per_day,
         )
     raise RunSpecError(
         f"unsupported model {spec.model!r}; use 'bedrock:<model_id>' or 'scripted'"
