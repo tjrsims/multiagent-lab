@@ -17,7 +17,9 @@ from typing import Any
 
 _FACTS = re.compile(r"private facts \(ground truth\): (?P<facts>.+)")
 _SCENARIO = re.compile(r"Scenario family: (?P<scenario>[a-z_]+)")
-_TURN = re.compile(r"Turn to judge:\n(?P<turn>.*?)\n\n", re.DOTALL)
+# The turn runs until the facts line or the verdict cue, not the first blank
+# line: 62 multi paragraph live turns were read as their first paragraph only.
+_TURN = re.compile(r"Turn to judge:\n(?P<turn>.*?)\n\n(?=Acting party's private facts|JSON verdict:)", re.DOTALL)
 
 
 class OracleJudgeModel:

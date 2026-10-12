@@ -77,6 +77,7 @@ class BatchManifest:
     strata: Mapping[str, int]
     seed: int
     version: str = ADJUDICATION_VERSION
+    dataset_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -86,6 +87,7 @@ class BatchManifest:
             "n_gold": self.n_gold,
             "strata": dict(self.strata),
             "seed": self.seed,
+            "dataset_hash": self.dataset_hash,
         }
 
 
@@ -105,6 +107,7 @@ def export_adjudication_batch(
     if not 0.0 <= gold_fraction < 1.0:
         raise AdjudicationError("gold_fraction must be in [0, 1)")
     views = build_views(dataset, allowed_runtime_paths=allowed_runtime_paths)
+    dataset_hash = (dataset.get("config") or {}).get("dataset_hash")
     rng = random.Random(seed)
     strata: dict[tuple[str, int, int], list[int]] = defaultdict(list)
     for index in range(views.n):
@@ -139,6 +142,14 @@ def export_adjudication_batch(
             "rule_label": "true" if views.labels[index] == 1 else "false",
             "group_id": str(views.group_ids[index]),
             "source_run_id": views.sources[index] if views.sources else None,
+            # The key binds each item to its turn, not just to a position in
+            # the views, so a relabel that shifts the view indices cannot
+            # mislabel a row on import.
+            "trial_id": str(views.trial_ids[index]) if views.trial_ids else None,
+            "generation_record_id": (
+                str(views.generation_record_ids[index]) if views.generation_record_ids else None
+            ),
+            "dataset_hash": dataset_hash,
             "is_gold": False,
             "gold_label": None,
         })
@@ -161,6 +172,9 @@ def export_adjudication_batch(
                 "rule_label": synthetic["gold_label"],
                 "group_id": str(views.group_ids[index]),
                 "source_run_id": views.sources[index] if views.sources else None,
+                "trial_id": None,
+                "generation_record_id": None,
+                "dataset_hash": dataset_hash,
                 "is_gold": True,
                 "gold_label": synthetic["gold_label"],
             })
@@ -188,7 +202,8 @@ def export_adjudication_batch(
         item["item_id"]: {
             "row_index": item["row_index"], "scenario": item["scenario"], "rule_label": item["rule_label"],
             "is_gold": item["is_gold"], "gold_label": item["gold_label"], "group_id": item["group_id"],
-            "source_run_id": item["source_run_id"],
+            "source_run_id": item["source_run_id"], "trial_id": item["trial_id"],
+            "generation_record_id": item["generation_record_id"], "dataset_hash": item["dataset_hash"],
         }
         for item in items
     }
@@ -196,6 +211,7 @@ def export_adjudication_batch(
     manifest = BatchManifest(
         batch_dir=target_dir, n_items=len(items), n_gold=len(gold),
         strata={f"{k[0]}|label={k[1]}|bin={k[2]}": allocation[k] for k in keys}, seed=seed,
+        dataset_hash=dataset_hash,
     )
     (target_dir / "batch_manifest.json").write_text(json.dumps(manifest.to_dict(), indent=2, sort_keys=True))
     (target_dir / "INSTRUCTIONS.txt").write_text(
@@ -238,6 +254,10 @@ class AdjudicationReport:
     human_labels_by_row: Mapping[int, bool]
     undetermined_items: int
     version: str = ADJUDICATION_VERSION
+    # ``"<trial_id>|<generation_record_id>" -> label`` for items whose key named
+    # the turn; the dataset hash the batch was exported from, when recorded.
+    human_labels_by_item: Mapping[str, bool] = field(default_factory=dict)
+    dataset_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -253,6 +273,8 @@ class AdjudicationReport:
             "confusion_by_scenario": {k: dict(v) for k, v in self.confusion_by_scenario.items()},
             "undetermined_items": self.undetermined_items,
             "human_labels_by_row": {str(k): v for k, v in self.human_labels_by_row.items()},
+            "human_labels_by_item": dict(self.human_labels_by_item),
+            "dataset_hash": self.dataset_hash,
         }
 
 
@@ -323,6 +345,7 @@ def import_ratings(
     agree_groups: list[str] = []
     confusion: dict[str, Counter[str]] = defaultdict(Counter)
     human_by_row: dict[int, bool] = {}
+    human_by_item: dict[str, bool] = {}
     undetermined = 0
     for item, info in key.items():
         if info["is_gold"] or item not in majority:
@@ -337,6 +360,8 @@ def import_ratings(
         agree_groups.append(str(info["group_id"]))
         if info["row_index"] is not None:
             human_by_row[int(info["row_index"])] = verdict == "true"
+            if info.get("trial_id") and info.get("generation_record_id"):
+                human_by_item[f"{info['trial_id']}|{info['generation_record_id']}"] = verdict == "true"
     agreement = (
         clustered_mean(agree_values, agree_groups, n_bootstrap=n_bootstrap, seed=seed)
         if agree_values else None
@@ -346,6 +371,8 @@ def import_ratings(
         gold_accuracy_by_rater=gold_accuracy, majority_labels=majority,
         rule_vs_human_agreement=agreement, confusion_by_scenario={k: dict(v) for k, v in confusion.items()},
         human_labels_by_row=human_by_row, undetermined_items=undetermined,
+        human_labels_by_item=human_by_item,
+        dataset_hash=next((info.get("dataset_hash") for info in key.values() if info.get("dataset_hash")), None),
     )
 
 
@@ -363,20 +390,36 @@ def apply_human_labels(
     """
     import copy
 
-    views = build_views(dataset, allowed_runtime_paths=allowed_runtime_paths)
+    this_hash = (dataset.get("config") or {}).get("dataset_hash")
+    if report.dataset_hash and this_hash and report.dataset_hash != this_hash:
+        raise AdjudicationError(
+            "these ratings were made on a different dataset (hash differs); relabeling or pooling "
+            "changes the row set, so apply them to the dataset the batch was exported from"
+        )
     out = copy.deepcopy(dict(dataset))
     metadata = out["metadata"]
     positions: dict[tuple[str, str], int] = {}
     for position, row in enumerate(metadata):
         positions[(str(row.get("trial_id")), str(row.get("generation_record_id")))] = position
     applied = 0
-    for view_index, label in report.human_labels_by_row.items():
-        key = (str(views.trial_ids[view_index]), str(views.generation_record_ids[view_index]))
-        if key not in positions:
-            raise AdjudicationError(f"could not align views row {view_index} back to the dataset")
-        metadata[positions[key]]["human_label"] = bool(label)
-        metadata[positions[key]]["human_label_version"] = ADJUDICATION_VERSION
-        applied += 1
+    if report.human_labels_by_item:
+        # Keyed by turn: no dependence on view indices.
+        for item_key, label in report.human_labels_by_item.items():
+            trial_id, _, record_id = item_key.partition("|")
+            if (trial_id, record_id) not in positions:
+                raise AdjudicationError(f"rated turn {item_key} is not in this dataset")
+            metadata[positions[(trial_id, record_id)]]["human_label"] = bool(label)
+            metadata[positions[(trial_id, record_id)]]["human_label_version"] = ADJUDICATION_VERSION
+            applied += 1
+    else:
+        views = build_views(dataset, allowed_runtime_paths=allowed_runtime_paths)
+        for view_index, label in report.human_labels_by_row.items():
+            key = (str(views.trial_ids[view_index]), str(views.generation_record_ids[view_index]))
+            if key not in positions:
+                raise AdjudicationError(f"could not align views row {view_index} back to the dataset")
+            metadata[positions[key]]["human_label"] = bool(label)
+            metadata[positions[key]]["human_label_version"] = ADJUDICATION_VERSION
+            applied += 1
     out.setdefault("config", {})
     if isinstance(out["config"], dict):
         out["config"]["human_labels_applied"] = applied

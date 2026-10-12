@@ -332,9 +332,18 @@ def judge(dataset_path, out_dir, judges, access, region, n_bootstrap, bin_width,
             raise click.UsageError(f"{key_path} not found; 'batch:<dir>' needs an exported adjudication batch")
         key = json.loads(key_path.read_text(encoding="utf-8"))
         indices = sorted({int(item["row_index"]) for item in key.values() if item.get("row_index") is not None})
+        this_hash = (dataset.get("config") or {}).get("dataset_hash")
+        key_hashes = {item.get("dataset_hash") for item in key.values() if item.get("dataset_hash")}
+        if key_hashes and key_hashes != {this_hash}:
+            raise click.UsageError("the batch was exported from a different dataset (dataset hash differs)")
         for item in key.values():
             row = item.get("row_index")
-            if row is not None and str(full_views.group_ids[int(row)]) != str(item.get("group_id")):
+            if row is None:
+                continue
+            if item.get("generation_record_id") and full_views.generation_record_ids and \
+                    str(full_views.generation_record_ids[int(row)]) != str(item["generation_record_id"]):
+                raise click.UsageError("the batch's rows do not line up with this dataset (record ids differ)")
+            if str(full_views.group_ids[int(row)]) != str(item.get("group_id")):
                 raise click.UsageError("the batch was exported from a different dataset: group ids do not line up")
         views, pairs = subset_views(full_views, indices), restrict_pairs(full_pairs, indices)
         selection["batch"] = str(Path(subset[len('batch:'):]))
@@ -356,11 +365,15 @@ def judge(dataset_path, out_dir, judges, access, region, n_bootstrap, bin_width,
                     click.echo(f"    {_spec} [{_mode}] {done}/{total} calls", err=True)
             runs.append(run_judge(views, model, access=mode, judge_name=spec, cache=cache, workers=workers,
                                   progress=_progress, rate_per_minute=rate_per_minute))
-            click.echo(f"  judged {spec} [{mode.value}]: undetermined={runs[-1].n_undetermined}/{views.n} cache_hits={runs[-1].cache_hits}")
+            click.echo(f"  judged {spec} [{mode.value}]: undetermined={runs[-1].n_undetermined}/{views.n} "
+                       f"parse_failures={runs[-1].n_parse_failures} recovered={runs[-1].n_recovered} cache_hits={runs[-1].cache_hits}")
         if ledger is not None:
             costs[spec] = ledger.totals()
             click.echo(f"  cost {spec}: ${costs[spec].get('usd', 0.0):.2f} over {costs[spec].get('calls', 0)} calls")
-    card = score_judges(views, runs, pairs=pairs, n_bootstrap=n_bootstrap)
+    # Views already restricted to the pairs would print the same rows twice as
+    # "all" and "paired"; a batch subset has no complete pairs to speak of.
+    score_subsets = ("paired",) if subset == 'paired' else ("all",) if subset.startswith('batch:') else ("all", "paired")
+    card = score_judges(views, runs, pairs=pairs, n_bootstrap=n_bootstrap, subsets=score_subsets)
     payload = card.to_dict()
     payload["selection"] = selection
     payload["costs"] = costs
@@ -609,7 +622,7 @@ def _judge_model(spec: str, region: str, cost_ledger=None):
     if spec.startswith("bedrock:"):
         from end_bench.models.bedrock import BedrockTextModel
 
-        return BedrockTextModel(spec, region=region, max_tokens=200, temperature=0.0, cost_ledger=cost_ledger)
+        return BedrockTextModel(spec, region=region, max_tokens=400, temperature=0.0, cost_ledger=cost_ledger)
     raise click.UsageError(f"unsupported judge {spec!r}; use 'oracle' or 'bedrock:<model_id>'")
 
 

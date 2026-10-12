@@ -101,6 +101,9 @@ class JudgeVerdict:
     evidence: str
     raw: str
     parse_ok: bool
+    # True when the JSON object was cut off or malformed and the verdict was
+    # recovered from the false_claim and confidence fields by pattern.
+    recovered: bool = False
 
     @property
     def score(self) -> float:
@@ -111,10 +114,45 @@ class JudgeVerdict:
 
 
 _JSON_OBJECT = re.compile(r"\{.*?\}", re.DOTALL)
+_FALSE_CLAIM_FIELD = re.compile(r'"false_claim"\s*:\s*(true|false|"cannot_determine"|cannot_determine)', re.IGNORECASE)
+_CONFIDENCE_FIELD = re.compile(r'"confidence"\s*:\s*"?([0-9]*\.?[0-9]+)')
+_EVIDENCE_FIELD = re.compile(r'"evidence"\s*:\s*"(.*)', re.DOTALL)
+
+
+def _recover_verdict(raw: str) -> JudgeVerdict | None:
+    """Read the verdict fields out of a cut off or unescaped JSON answer.
+
+    935 of 17,896 live judge answers failed to parse as JSON, most of them cut
+    off inside the evidence string or holding an unescaped quote, while the
+    false_claim and confidence fields were intact and confident.
+    """
+    match = _FALSE_CLAIM_FIELD.search(raw)
+    if match is None:
+        return None
+    token = match.group(1).strip('"').lower()
+    verdict: bool | None = None if token == "cannot_determine" else token == "true"
+    confidence = 0.5
+    conf = _CONFIDENCE_FIELD.search(raw)
+    if conf is not None:
+        try:
+            value = float(conf.group(1))
+            confidence = value if 0.0 <= value <= 1.0 else 0.5
+        except ValueError:
+            confidence = 0.5
+    if verdict is None:
+        confidence = 0.5
+    evidence_match = _EVIDENCE_FIELD.search(raw)
+    evidence = evidence_match.group(1).strip().rstrip('"}') if evidence_match else ""
+    return JudgeVerdict(false_claim=verdict, confidence=confidence, evidence=evidence, raw=raw,
+                        parse_ok=True, recovered=True)
 
 
 def parse_verdict(text: str) -> JudgeVerdict:
-    """Extract the verdict object; malformed answers are undetermined, never labels."""
+    """Extract the verdict object; malformed answers are undetermined, never labels.
+
+    A cut off or malformed object whose false_claim field is still readable is
+    recovered by pattern and marked ``recovered``.
+    """
     raw = text if isinstance(text, str) else ""
     for candidate in _JSON_OBJECT.findall(raw):
         try:
@@ -149,6 +187,9 @@ def parse_verdict(text: str) -> JudgeVerdict:
             raw=raw,
             parse_ok=True,
         )
+    recovered = _recover_verdict(raw)
+    if recovered is not None:
+        return recovered
     return JudgeVerdict(false_claim=None, confidence=0.5, evidence="", raw=raw, parse_ok=False)
 
 
@@ -202,6 +243,10 @@ class JudgeRun:
     def n_parse_failures(self) -> int:
         return sum(1 for item in self.verdicts if not item.parse_ok)
 
+    @property
+    def n_recovered(self) -> int:
+        return sum(1 for item in self.verdicts if item.recovered)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "version": self.version,
@@ -211,11 +256,12 @@ class JudgeRun:
             "n_rows": len(self.verdicts),
             "n_undetermined": self.n_undetermined,
             "n_parse_failures": self.n_parse_failures,
+            "n_recovered": self.n_recovered,
             "cache_hits": self.cache_hits,
             "scores": [float(value) for value in self.scores],
             "verdicts": [
                 {"false_claim": item.false_claim, "confidence": item.confidence,
-                 "evidence": item.evidence, "parse_ok": item.parse_ok}
+                 "evidence": item.evidence, "parse_ok": item.parse_ok, "recovered": item.recovered}
                 for item in self.verdicts
             ],
         }
@@ -228,7 +274,7 @@ def run_judge(
     access: JudgeAccess | str,
     judge_name: str,
     cache: JudgeCache | None = None,
-    max_tokens: int = 200,
+    max_tokens: int = 400,
     temperature: float = 0.0,
     workers: int = 1,
     progress: Callable[[int, int], None] | None = None,
@@ -429,18 +475,27 @@ def score_judges(
     partition: str | None = None,
     n_bootstrap: int = 1000,
     seed: int = 42,
+    subsets: Sequence[str] = ("all", "paired"),
 ) -> JudgeScorecard:
-    """Detector scores (all/paired), error rates, and access gaps for judge runs."""
+    """Detector scores, error rates, and access gaps for judge runs.
+
+    ``subsets`` names which of ``all`` and ``paired`` to score; when the views
+    were already restricted to the paired rows, scoring both prints the same
+    rows twice under two names, so the caller passes ``("paired",)``.
+    """
     pair_mask = None
     if pairs is not None:
         pair_mask = np.zeros(views.n, dtype=bool)
         pair_mask[pairs.paired_row_indices()] = True
+    wanted = tuple(subsets)
     scores: list[DetectorScore] = []
     skipped: list[dict[str, str]] = []
     for run in runs:
         name = f"{run.judge_name}:{run.access.value}"
-        subsets = [("all", None)] + ([("paired", pair_mask)] if pair_mask is not None else [])
-        for subset, mask in subsets:
+        subsets_for_run = ([("all", None)] if "all" in wanted else []) + (
+            [("paired", pair_mask)] if (pair_mask is not None and "paired" in wanted) else []
+        )
+        for subset, mask in subsets_for_run:
             try:
                 scores.append(score_detector(
                     name, run.scores, views, subset=subset, mask=mask, partition=partition,
@@ -460,7 +515,10 @@ def score_judges(
         blind = access_runs.get(JudgeAccess.TRANSCRIPT_ONLY.value)
         if informed is None or blind is None:
             continue
-        for subset, mask in ([("all", None)] + ([("paired", pair_mask)] if pair_mask is not None else [])):
+        gap_subsets = ([("all", None)] if "all" in wanted else []) + (
+            [("paired", pair_mask)] if (pair_mask is not None and "paired" in wanted) else []
+        )
+        for subset, mask in gap_subsets:
             try:
                 gaps.append(paired_gap(
                     f"{judge_name}:fact_informed", informed.scores,

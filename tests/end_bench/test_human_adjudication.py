@@ -147,3 +147,73 @@ def test_import_writes_a_loadable_activation_bundle_for_white_box_datasets(tmp_p
     assert relabeled["activations"], "activation arrays must survive the relabel"
     human_views = build_views(relabeled, label_source="human")
     assert human_views.n >= 1
+
+
+def test_key_binds_each_item_to_its_turn_and_dataset(session_dataset, tmp_path) -> None:
+    """A relabel shifts the view indices; the key must still name the turn it was rated on."""
+    import copy
+    import random
+
+    batch = tmp_path / "batch"
+    manifest = export_adjudication_batch(session_dataset, batch, n=6, seed=4, gold_fraction=0.0)
+    expected_hash = session_dataset["config"]["dataset_hash"]
+    assert manifest.dataset_hash == expected_hash
+    assert manifest.to_dict()["dataset_hash"] == expected_hash
+    key = json.loads((batch / "private" / "KEY.json").read_text())
+    views = build_views(session_dataset)
+    for info in key.values():
+        row = info["row_index"]
+        assert info["dataset_hash"] == expected_hash
+        assert info["trial_id"] == str(views.trial_ids[row])
+        assert info["generation_record_id"] == str(views.generation_record_ids[row])
+
+    r1, r2 = tmp_path / "a.csv", tmp_path / "b.csv"
+    _write_ratings(r1, key, "a")
+    _write_ratings(r2, key, "b")
+    report = import_ratings(batch, [r1, r2], n_bootstrap=20)
+    assert report.dataset_hash == expected_hash
+    assert len(report.human_labels_by_item) == len(report.human_labels_by_row) == len(key)
+    assert report.to_dict()["dataset_hash"] == expected_hash
+
+    # Same rows in a different order: the by-turn key still lands on the right turns.
+    shuffled = copy.deepcopy(dict(session_dataset))
+    random.Random(0).shuffle(shuffled["metadata"])
+    labeled = apply_human_labels(shuffled, report)
+    labeled_keys = {(row["trial_id"], row["generation_record_id"]) for row in labeled["metadata"] if "human_label" in row}
+    assert labeled_keys == {(info["trial_id"], info["generation_record_id"]) for info in key.values()}
+    for row in labeled["metadata"]:
+        if "human_label" in row:
+            assert row["human_label"] == report.human_labels_by_item[f"{row['trial_id']}|{row['generation_record_id']}"]
+
+    # Ratings made on a different dataset are refused.
+    other = copy.deepcopy(dict(session_dataset))
+    other["config"]["dataset_hash"] = "sha256:" + "0" * 64
+    with pytest.raises(AdjudicationError, match="different dataset"):
+        apply_human_labels(other, report)
+
+    # A rated turn missing from the dataset is refused rather than skipped.
+    trimmed = copy.deepcopy(dict(session_dataset))
+    first_item = next(iter(report.human_labels_by_item))
+    trial_id, _, record_id = first_item.partition("|")
+    trimmed["metadata"] = [r for r in trimmed["metadata"] if (r["trial_id"], r["generation_record_id"]) != (trial_id, record_id)]
+    with pytest.raises(AdjudicationError, match="not in this dataset"):
+        apply_human_labels(trimmed, report)
+
+
+def test_judge_batch_subset_refuses_a_key_from_another_dataset(session_smoke_run, tmp_path) -> None:
+    from click.testing import CliRunner
+
+    from end_bench.cli import cli
+
+    dataset = str(session_smoke_run.text_dataset_path)
+    runner = CliRunner()
+    export = runner.invoke(cli, ["adjudicate", "export", "--dataset", dataset, "--out", str(tmp_path / "batch"), "--n", "4", "--gold-fraction", "0.0"])
+    assert export.exit_code == 0, export.output
+    key_path = tmp_path / "batch" / "private" / "KEY.json"
+    key = json.loads(key_path.read_text())
+    for info in key.values():
+        info["dataset_hash"] = "sha256:" + "f" * 64
+    key_path.write_text(json.dumps(key))
+    result = runner.invoke(cli, ["judge", "--dataset", dataset, "--out", str(tmp_path / "judge"), "--judge", "oracle",
+                                 "--subset", f"batch:{tmp_path / 'batch'}", "--n-bootstrap", "10"])
+    assert result.exit_code != 0 and "different dataset" in result.output
