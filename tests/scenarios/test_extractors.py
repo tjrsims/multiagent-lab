@@ -280,7 +280,7 @@ def test_factory_builds_all_six_runtime_protocol_implementations() -> None:
         assert isinstance(first, ScenarioActionExtractor)
         assert first is not second
         assert first.scenario_id == scenario_id
-        assert first.parser_version == "1.3.0"
+        assert first.parser_version == "1.4.0"
 
     configs = default_extractor_configs()
     assert tuple(config.scenario_id for config in configs) == SCENARIOS
@@ -355,7 +355,9 @@ def test_explicit_registry_serializes_concurrent_duplicate_registration() -> Non
     [
         (
             "ultimatum_bluff",
-            "This is not my final offer: 50 points; I can accept 35.",
+            # 1.4.0: "I can accept 35" is a decision, so the gap string now
+            # states the reservation with the negation safe trigger instead.
+            "I will not accept less than 35 points.",
             [35],
             [],
         ),
@@ -485,13 +487,15 @@ def test_capability_normalizes_explicit_duration_units(
     _assert_exact_evidence(action)
 
 
-def test_capability_future_delivery_is_both_claim_and_commitment() -> None:
+def test_capability_future_delivery_is_a_commitment_not_a_claim() -> None:
+    """1.4.0: a schedule the team offers is a commitment; only need, require,
+    estimate and realism statements claim the days the team truly needs."""
     action = _extract(
         "capability_bluff",
         "We will deliver in 36 hours.",
         round_index=4,
     )
-    assert _claim_values(action) == [1.5]
+    assert _claim_values(action) == []
     commitments = [
         (item.promised_action_id, item.effective_round)
         for item in action.commitments

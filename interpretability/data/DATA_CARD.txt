@@ -28,7 +28,7 @@ New datasets are a JSON manifest plus numeric NPZ arrays. The manifest binds eve
 
 Audit/manual-salvage recovery uses the distinct `activation-recovery/4` (loads `/3` snapshots by filling the `text_turns` list they predate) JSON+NPZ contract. It preserves accumulated tensors, typed canonical records, trial/runtime/capture identity, the complete cross-trial intervention design/schedule/application-log graph, and progress without claiming split eligibility. A supplied active-trial runtime envelope must agree with those aggregate records. Public aggregate CLIs cannot resume a schedule from completed-trial snapshots: those artifacts omit the active runtime envelope and complete result accumulator. Restarting is a new run, never pseudo-resume. Text-only recovery may contain records and transcripts with no activation rows. Recovery artifacts cannot be loaded as `activation_dataset/4.2.0`; instructed legacy rows are archived this way and remain non-headline.
 
-The current contract set is schema registry `2.4.0`, runtime executor `emergent-trial-executor/12`, trial runtime `1.7.0`, and intervention application/application-log `1.1.0`.
+The current contract set is schema registry `2.4.0`, runtime executor `emergent-trial-executor/13`, trial runtime `1.7.0`, and intervention application/application-log `1.1.0`.
 
 PROVENANCE AND SECURITY
 
@@ -40,4 +40,4 @@ Offline fake-model tests validate contracts, not construct validity. Release req
 
 Rows carry `counterpart_policy_id`, the content hash of the counterpart policy spec that rendered the counterpart prompt (`scenarios/policy_registry.py`). Module policies are identity bearing provenance, like the agent profile and protocol; results across different policy ids are never pooled silently.
 
-Claim extraction is extractor `1.3.0` (ambiguity tracked per clause kind; decision wording, bare trigger mentions and a reply wrapped in quotation marks do not void claims) over domain `amount-parser/2` (bounded value claims, markdown emphasis). Labels made with earlier versions carry their own `extractor_version` and are not relabeled in place.
+Claim extraction is extractor `1.3.0` (ambiguity tracked per clause kind; decision wording, bare trigger mentions and a reply wrapped in quotation marks do not void claims) over domain `amount-parser/3` (bounded value claims, markdown emphasis). Labels made with earlier versions carry their own `extractor_version` and are not relabeled in place.

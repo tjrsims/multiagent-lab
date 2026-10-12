@@ -733,14 +733,14 @@ def test_commitment_parsers_fail_closed_for_negation_and_ambiguous_execution() -
     ) is None
 
 
-# --- bounded value claims (amount-parser/2) -------------------------------------------
+# --- bounded value claims (amount-parser/3) -------------------------------------------
 
 def test_bounded_value_claims_parse_with_a_bound_and_round_trip() -> None:
     from negotiation.domain.parsing import AMOUNT_PARSER_VERSION, parse_observed_action
     from negotiation.domain.schema import AmountKind, AmountMention, ObservedAction
 
     action = parse_observed_action("For the record, the item is worth at least $77 to me.")
-    assert action.parser_version == AMOUNT_PARSER_VERSION == "amount-parser/2"
+    assert action.parser_version == AMOUNT_PARSER_VERSION == "amount-parser/3"
     [mention] = action.amounts
     assert mention.kind is AmountKind.ASSERTED_MARKET_VALUE
     assert mention.amount == 77 and mention.bound == "lower"

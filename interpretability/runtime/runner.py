@@ -138,7 +138,8 @@ from negotiation.game_master.components.gm_state import NegotiationStateTracker
 from negotiation.profiles import AgentProfile, validate_agent_profile
 
 
-RUNTIME_EXECUTOR_VERSION = 'emergent-trial-executor/12'
+RUNTIME_EXECUTOR_VERSION = 'emergent-trial-executor/13'  # /13: acceptance needs an acceptance verb
+ACCEPTANCE_PATTERN = r"\b(?:i|we)\s+(?:accept|agree)\b|\b(?:it'?s|that'?s|we\s+have|you\s+have|we've\s+got)\s+a\s+deal\b|(?:^|[.!?]\s*)deal[.!]"
 
 AgentBuilder = Callable[[str, str, Callable[[], Any]], Any]
 Evaluator = Callable[
@@ -3726,9 +3727,18 @@ class EmergentTrialExecutor:
         active_offer_id = EmergentTrialExecutor._active_offer_for(
             actor_id, events
         )
-        if active_offer_id and re.search(
-            r'\b(?:i|we)\s+(?:accept|agree)|\bdeal\b', lowered
-        ):
+        if re.search(r'\b(?:walk away|end negotiations?|no deal)\b', lowered):
+            return NegotiationAction(
+                action_ref=generation.call_id,
+                actor_id=actor_id,
+                kind=ActionKind.WALK_AWAY,
+                reason=text,
+                raw_text=text,
+            )
+        # Acceptance needs an acceptance verb or a closing idiom. The bare
+        # word "deal" ("a fair deal for both", "sweeten the deal") used to
+        # close 85% of the withholding deal_close triggers by accident.
+        if active_offer_id and re.search(ACCEPTANCE_PATTERN, lowered):
             return NegotiationAction(
                 action_ref=generation.call_id,
                 actor_id=actor_id,

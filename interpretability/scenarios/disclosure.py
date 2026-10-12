@@ -203,7 +203,8 @@ def split_speaker(line: str) -> tuple[str | None, str]:
     return None, str(line)
 
 
-_ACCEPT_WORDS = re.compile(r"\b(?:i|we)\s+(?:accept|agree)|\bdeal\b")
+# Mirrors the executor's ACCEPTANCE_PATTERN: a verb or a closing idiom, never the bare word "deal".
+_ACCEPT_WORDS = re.compile(r"\b(?:i|we)\s+(?:accept|agree)\b|\b(?:it'?s|that'?s|we\s+have|you\s+have|we've\s+got)\s+a\s+deal\b|(?:^|[.!?]\s*)deal[.!]")
 
 
 def accepts_deal_from_transcript(response: str, counterpart_lines: Sequence[str]) -> bool:

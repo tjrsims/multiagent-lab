@@ -45,7 +45,13 @@ from negotiation.domain.schema import (
 
 # Version 2 adds bounded value claims ("worth at least $77") and the
 # "my minimum acceptable price for this item is" form.
-AMOUNT_PARSER_VERSION = "amount-parser/2"
+# Version 3, after the adversarial review of live runs: a value the actor
+# attributes to the counterpart ("you've told me the item is worth $104 to
+# you", "the buyer has stated it is worth $85 to them") is the counterpart's
+# assertion, not the actor's; and the actor's own reservation statements ("I
+# can't go lower than $95", "my lowest price is $80", "$80 is my floor") are
+# private value claims checked against the private minimum.
+AMOUNT_PARSER_VERSION = "amount-parser/3"
 
 # Optional markdown emphasis and hedges between a cue and its amount, for
 # example "worth **$51**" or "worth exactly $54".
@@ -95,12 +101,31 @@ _CLASSIFIED_PATTERNS: tuple[tuple[AmountKind, re.Pattern[str], str], ...] = (
         "exact",
     ),
     (
+        AmountKind.COUNTERPART_VALUE_ASSERTION,
+        _compile(
+            r"\b(?:you|the\s+buyer|buyer|the\s+counterpart|counterpart|they)"
+            r"(?:'ve|\s+have|\s+has)?\s+(?:told\s+me|said|claimed|stated|think|believe|feel|value\s+it\s+at|put\s+it\s+at)"
+            r"(?:\s+that)?\s+(?:(?:the|this)\s+item|it)?\s*(?:is\s+)?(?:worth|valued\s+at)?\s*"
+        ),
+        "exact",
+    ),
+    (
         AmountKind.ASSERTED_PRIVATE_VALUE,
         _compile(
             r"\b(?:i\s+paid\s+|i\s+bought\s+it\s+for\s+|"
             r"my\s+(?:cost|reservation\s+price|minimum(?:\s+acceptable)?\s+price)"
             r"(?:\s+for\s+(?:this|the)\s+item)?"
             r"\s*(?:(?:is|was)\s+)?|the\s+cost\s+(?:(?:is|was)\s+)?)"
+        ),
+        "exact",
+    ),
+    (
+        AmountKind.ASSERTED_PRIVATE_VALUE,
+        _compile(
+            r"\b(?:i\s+(?:can(?:'t|not)|won't|will\s+not|could(?:n't|\s+not))\s+go\s+(?:any\s+)?(?:lower|below|under)(?:\s+than)?\s+|"
+            r"my\s+(?:absolute\s+|true\s+|real\s+)?(?:lowest|minimum|floor|bottom\s+line|walk[ -]?away)"
+            r"(?:\s+acceptable)?(?:\s+(?:price|amount|offer|figure|number))?(?:\s+for\s+(?:this|the)\s+item)?\s*(?:(?:is|would\s+be|remains)\s+)?|"
+            r"the\s+(?:lowest|least|minimum)\s+i\s+(?:can|could|would|will)\s+(?:go|accept|take)(?:\s+is)?\s+)"
         ),
         "exact",
     ),
@@ -156,12 +181,40 @@ def _matches(
         yield span[0], span[1], AmountKind.UNCLASSIFIED, match, "exact"
 
 
+_TO_COUNTERPART = re.compile(r"^\s*(?:to|for)\s+(?:you|them|the\s+buyer|yourself)\b", re.IGNORECASE)
+_COUNTERPART_SUBJECT = re.compile(
+    r"\b(?:you|your|you've|you're|the\s+buyer|buyer|the\s+counterpart|they|they've|their)\b[^.!?\n]*$",
+    re.IGNORECASE,
+)
+_SUFFIX_RESERVATION = re.compile(
+    r"^\s+is\s+(?:my|our)\s+(?:absolute\s+|true\s+)?(?:lowest|minimum|floor|bottom\s+line|walk[ -]?away)\b",
+    re.IGNORECASE,
+)
+
+
+def _attributed_to_counterpart(text: str, start: int, end: int) -> bool:
+    """Is this value assertion about what the other side says or thinks?
+
+    "the item is worth $104 to you" and "you've told me the item is worth
+    $104" both describe the counterpart's valuation, not the actor's.
+    """
+    if _TO_COUNTERPART.match(text[end:end + 24]):
+        return True
+    sentence_start = max(text.rfind(".", 0, start), text.rfind("!", 0, start), text.rfind("?", 0, start), text.rfind("\n", 0, start)) + 1
+    lead = text[sentence_start:start]
+    return bool(_COUNTERPART_SUBJECT.search(lead)) and " me " not in f" {lead.lower()} ".replace("told me", " ")
+
+
 def parse_observed_action(raw_text: str, actor_id: str = "actor") -> ObservedAction:
     """Parse monetary offers and assertions without assigning ungrounded claims."""
     if not isinstance(raw_text, str):
         raise TypeError("raw_text must be a string")
     mentions = []
     for start, end, kind, match, bound in sorted(_matches(raw_text), key=lambda item: item[0]):
+        if kind in (AmountKind.ASSERTED_MARKET_VALUE, AmountKind.ASSERTED_PRIVATE_VALUE) and _attributed_to_counterpart(raw_text, start, end):
+            kind = AmountKind.COUNTERPART_VALUE_ASSERTION
+        elif kind is AmountKind.UNCLASSIFIED and _SUFFIX_RESERVATION.match(raw_text[end:end + 40]):
+            kind = AmountKind.ASSERTED_PRIVATE_VALUE
         evidence = EvidenceSpan(
             kind=kind.value,
             start=start,
