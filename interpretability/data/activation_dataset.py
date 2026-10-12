@@ -15,7 +15,7 @@ import torch
 from .io import load_array_bundle, load_trusted_legacy_torch, save_array_bundle
 
 
-ACTIVATION_DATASET_SCHEMA_VERSION = "4.1.0"
+ACTIVATION_DATASET_SCHEMA_VERSION = "4.2.0"  # 4.2.0 adds interventions_delivered_before_turn
 _KNOWN_TRACKS = {
     "text_only",
     "single_agent_white_box",
@@ -553,6 +553,13 @@ def _validate_intervention_lineage(
             )
         if len(set(raw_receipt_ids)) != len(raw_receipt_ids):
             raise ValueError("metadata intervention receipt IDs must be unique")
+        delivered = row.get("interventions_delivered_before_turn", [])
+        if not isinstance(delivered, list) or any(
+            not isinstance(receipt_id, str) or not receipt_id for receipt_id in delivered
+        ) or not set(delivered) <= set(raw_receipt_ids):
+            raise ValueError(
+                "interventions_delivered_before_turn must list receipt IDs from the row's own trial"
+            )
         has_scenario_instance = (
             isinstance(scenario_instance_id, str) and bool(scenario_instance_id)
         )

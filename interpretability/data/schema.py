@@ -154,6 +154,9 @@ class ActivationSample:
     counterpart_profile: Optional[str] = None
     intervention_design_id: Optional[str] = None
     intervention_application_receipt_ids: List[str] = field(default_factory=list)
+    # Receipts of interventions delivered at or before this row's own turn
+    # (a subset of the trial level list above); empty for rows before any notice.
+    interventions_delivered_before_turn: List[str] = field(default_factory=list)
     # Rule-v2 turn-label provenance (benchmark_v1_fixes Phase 1). These mirror
     # the selected rule ``LabelRecord`` so dataset rows can be filtered by claim
     # status and label source without reloading the label records.

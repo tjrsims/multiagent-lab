@@ -2770,13 +2770,25 @@ class EmergentTrialExecutor:
         intervention_design_id = thaw_json(instance.public_state).get(
             'intervention_design_id'
         )
-        intervention_receipt_ids = (
-            [
-                receipt.receipt_id
-                for receipt in intervention_application_log.receipts
-            ]
+        applied_receipts = (
+            list(intervention_application_log.receipts)
             if intervention_application_log is not None else []
         )
+        # Trial level provenance: every row names every receipt of its trial.
+        intervention_receipt_ids = [receipt.receipt_id for receipt in applied_receipts]
+
+        def receipts_before(turn_boundary: Any) -> list[str]:
+            """Receipts of interventions applied at or before this row's own turn.
+
+            A round 0 row cannot have seen a notice delivered in round 4, so the
+            per row field says which notices the actor had actually received.
+            """
+            if not isinstance(turn_boundary, int):
+                return []
+            return [
+                receipt.receipt_id for receipt in applied_receipts
+                if receipt.committed_action_boundary <= turn_boundary
+            ]
         projection_policy = self._projection_policy_for(instance.scenario)
         counterbalance_state = thaw_json(instance.public_state).get(
             'counterbalance', {}
@@ -2958,6 +2970,9 @@ class EmergentTrialExecutor:
                 intervention_design_id=intervention_design_id,
                 intervention_application_receipt_ids=list(
                     intervention_receipt_ids
+                ),
+                interventions_delivered_before_turn=receipts_before(
+                    turn.get('event_boundary')
                 ),
                 claim_status=rule_metadata.get('claim_status'),
                 behavior_subtype=rule_metadata.get('behavior_subtype'),

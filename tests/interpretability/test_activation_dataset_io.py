@@ -792,7 +792,7 @@ def test_public_dataset_embeds_complete_intervention_lineage(
     )
     data = load_activation_dataset(manifest_path)
 
-    assert data["config"]["dataset_schema_version"] == "4.1.0"
+    assert data["config"]["dataset_schema_version"] == "4.2.0"
     assert len(data["intervention_designs"]) == 1
     assert len(data["intervention_schedules"]) == 3
     assert len(data["intervention_application_logs"]) == 3

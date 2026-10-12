@@ -298,3 +298,67 @@ def test_failed_trials_are_counted_in_the_manifest_and_printed(tmp_path, monkeyp
     monkeypatch.setattr(_click, "echo", lambda msg, **kw: captured.append(str(msg)))
     _echo_result(result)
     assert any("failed of" in line and "RuntimeError" in line for line in captured)
+
+
+def test_both_attestations_reach_the_actor_and_receipts_follow_rows(tmp_path) -> None:
+    """Live part A runs with timing 'both' delivered only the early notice: the two
+    notices had identical text and Concordia's memory drops duplicates. Each
+    notice now carries its own lead sentence, and a row names only the receipts
+    of notices delivered at or before its own turn."""
+    spec = RunSpec(model="scripted", scenarios=("hidden_value",), conditions=("high_incentive",),
+                   families=1, max_rounds=5, rollouts_per_family=1, paired_facts=False,
+                   closing_attestation=True, attestation_timing="both", run_id="both-notices")
+    result = run_text_track(spec, tmp_path, preflight=False)
+    dataset = load_text_dataset(result.text_dataset_path)
+    records = {r["call_id"]: r for r in dataset["generation_records"]}
+    rows = sorted((r for r in dataset["metadata"] if r["sample_type"] == "negotiation"), key=lambda r: r["round_num"])
+    assert rows and rows[-1]["round_num"] == 4
+    last_prompt = records[rows[-1]["generation_record_id"]]["assembled_prompt"]
+    marks = [m.start() for m in __import__("re").finditer(r"SCRIPTED PUBLIC OBSERVATION", last_prompt)]
+    assert len(marks) == 2, "both notices must be in the actor's last prompt"
+    hashes = set(__import__("re").findall(r"content_hash=(sha256:[0-9a-f]+)", last_prompt))
+    assert len(hashes) == 2, "the two notices must differ, or the agent's memory drops one"
+    assert "Early notice." in last_prompt and "Closing notice." in last_prompt
+    first_prompt = records[rows[0]["generation_record_id"]]["assembled_prompt"]
+    assert "SCRIPTED PUBLIC OBSERVATION" not in first_prompt
+    assert len(rows[0]["intervention_application_receipt_ids"]) == 2, "trial level provenance names both receipts"
+    assert rows[0]["interventions_delivered_before_turn"] == [], "round 0 happened before any notice"
+    assert len(rows[1]["interventions_delivered_before_turn"]) == 1
+    assert len(rows[-1]["interventions_delivered_before_turn"]) == 2
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["closing_attestation_source"] == "registered:closing-attestation/3"
+
+
+def test_run_settings_override_concordia_sampling_defaults(tmp_path, monkeypatch) -> None:
+    """Every live record requested Concordia's defaults (temperature 1.0, 2,200 tokens)
+    while the manifests claimed the run spec's 0.7 and 160. The adapter now sends
+    the run spec's values and records the caller's as requested only."""
+    import end_bench.run as run_module
+    from end_bench.models.bedrock import BedrockTextModel
+
+    class _Client:
+        def __init__(self):
+            self.requests = []
+
+        def converse(self, **request):
+            self.requests.append(request)
+            return {"output": {"message": {"role": "assistant", "content": [{"text": "For the record, the item is worth $60 to me. I can do $70."}]}},
+                    "usage": {"inputTokens": 100, "outputTokens": 20}, "stopReason": "end_turn"}
+
+    client = _Client()
+    monkeypatch.setattr(run_module, "_build_model", lambda spec, ledger: BedrockTextModel(
+        "amazon.nova-lite-v1:0", client=client, max_tokens=spec.max_tokens, temperature=spec.temperature,
+        cost_ledger=ledger, honor_caller_sampling=False))
+    spec = RunSpec(model="bedrock:amazon.nova-lite-v1:0", scenarios=("hidden_value",), conditions=("high_incentive",),
+                   families=1, max_rounds=2, rollouts_per_family=1, paired_facts=False, run_id="sampling-check",
+                   max_tokens=160, temperature=0.7)
+    result = run_text_track(spec, tmp_path, preflight=False)
+    sent = {(r["inferenceConfig"]["maxTokens"], r["inferenceConfig"]["temperature"], r["inferenceConfig"].get("topP")) for r in client.requests}
+    assert sent == {(160, 0.7, 0.9)}, sent
+    dataset = load_text_dataset(result.text_dataset_path)
+    for record in dataset["generation_records"]:
+        assert record["effective_sampling"]["max_tokens"] == 160
+        assert record["effective_sampling"]["temperature"] == 0.7
+        assert record["requested_sampling"]["max_tokens"] == 2200, "Concordia's request is recorded, not applied"
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["sampling"]["temperature"] == 0.7 and manifest["sampling"]["max_tokens"] == 160

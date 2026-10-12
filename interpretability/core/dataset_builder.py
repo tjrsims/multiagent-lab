@@ -549,6 +549,9 @@ class DatasetBuilder:
             "intervention_application_receipt_ids": list(
                 sample.intervention_application_receipt_ids
             ),
+            "interventions_delivered_before_turn": list(
+                getattr(sample, "interventions_delivered_before_turn", ())
+            ),
             "counterpart_idx": sample.counterpart_idx,
             "counterpart_name": sample.counterpart_name,
             "counterpart_type": sample.counterpart_type,

@@ -78,7 +78,7 @@ def test_module_run_records_provenance_on_manifest_and_rows(module_run) -> None:
     assert manifest["benchmark_module"]["name"] == "deception_under_incentive"
     assert manifest["benchmark_module"]["version"] == "0.1.0"
     assert manifest["closing_attestation"] is True
-    assert manifest["closing_attestation_source"] == "registered:closing-attestation/2"
+    assert manifest["closing_attestation_source"] == "registered:closing-attestation/3"
     assert manifest["spec"]["closing_attestation"] is True
     assert manifest["execution_plan"]["counterpart_policy_ids"] == [module.policy_registry.get("interrogative").policy_id]
     dataset = load_text_dataset(result.text_dataset_path)

@@ -118,6 +118,7 @@ def _build_model(spec: RunSpec, ledger: CostLedger):
             temperature=spec.temperature,
             cost_ledger=ledger,
             token_budget_per_day=spec.token_budget_per_day,
+            honor_caller_sampling=False,  # the run spec, not Concordia's per call defaults, is sent
         )
     raise RunSpecError(
         f"unsupported model {spec.model!r}; use 'bedrock:<model_id>' or 'scripted'"
@@ -245,6 +246,14 @@ def run_text_track(
         "closing_attestation": closing_attestation,
         "closing_attestation_source": CLOSING_ATTESTATION_SOURCE if closing_attestation else None,
         "attestation_timing": attestation_timing if closing_attestation else None,
+        # What the adapter sends on every acting call. Concordia asks for its
+        # own defaults per call; the adapter ignores them and sends these.
+        "sampling": {
+            "temperature": spec.temperature,
+            "max_tokens": spec.max_tokens,
+            "top_p": "adapter default 0.9; not sent to Anthropic models",
+            "policy": "run spec values override caller values; the generation records hold requested and effective",
+        },
         "started_at": time.time(),
     }
     (target / "run_manifest.json").write_text(json.dumps(manifest_head, indent=2, sort_keys=True, default=str))

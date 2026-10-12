@@ -841,7 +841,7 @@ def run(mode, model, device, dtype, scenarios, scenario_name, trials,
             **instructed_offsets,
             reason=(
                 "legacy instructed rows are unclassified, non-headline, and "
-                "ineligible for activation_dataset/4.1.0 publication"
+                "ineligible for activation_dataset/4.2.0 publication"
             ),
             experiment_progress={
                 "experiment_mode": mode,

@@ -5283,6 +5283,9 @@ Example: yes, yes'''
                 'intervention_application_receipt_ids': list(
                     sample.intervention_application_receipt_ids
                 ),
+                'interventions_delivered_before_turn': list(
+                    getattr(sample, 'interventions_delivered_before_turn', ())
+                ),
                 # Multi-agent fields
                 'counterpart_idx': sample.counterpart_idx,
                 'counterpart_name': sample.counterpart_name,
@@ -5608,7 +5611,7 @@ Example: yes, yes'''
                 'Cannot save an activation dataset with zero activation rows'
                 + (
                     f'; this text-only run holds {n_text} text rows that '
-                    'activation_dataset/4.1.0 cannot carry. Persist them as an '
+                    'activation_dataset/4.2.0 cannot carry. Persist them as an '
                     'end_bench_text_dataset via end_bench.run.run_text_track '
                     '(`end-bench run-text`), or retain the generation records '
                     'and transcript as recovery/evidence artifacts.'

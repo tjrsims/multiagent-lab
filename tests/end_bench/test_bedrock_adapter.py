@@ -296,3 +296,19 @@ def test_token_budget_paces_calls_under_a_rolling_daily_window() -> None:
     assert model.get_last_sampling_config()["token_budget_per_day"] == 2000
     with pytest.raises(ValueError, match="token_budget_per_day"):
         BedrockTextModel("amazon.nova-lite-v1:0", client=client, token_budget_per_day=0)
+
+
+def test_configured_sampling_wins_over_caller_values_unless_asked() -> None:
+    client = FakeConverseClient()
+    model = BedrockTextModel("amazon.nova-lite-v1:0", client=client, max_tokens=160, temperature=0.7, top_p=0.9,
+                             honor_caller_sampling=False)
+    model.sample_text("p", max_tokens=2200, temperature=1.0, top_p=0.95, top_k=64)
+    cfg = client.requests[-1]["inferenceConfig"]
+    assert (cfg["maxTokens"], cfg["temperature"], cfg["topP"]) == (160, 0.7, 0.9)
+    prov = model.get_last_sampling_config()
+    assert prov["requested"]["max_tokens"] == 2200 and prov["effective"]["max_tokens"] == 160
+    assert prov["requested"]["temperature"] == 1.0 and prov["effective"]["temperature"] == 0.7
+    honoring = BedrockTextModel("amazon.nova-lite-v1:0", client=client, max_tokens=160, temperature=0.7, top_p=0.9)
+    honoring.sample_text("p", max_tokens=2200, temperature=1.0, top_p=0.95)
+    cfg = client.requests[-1]["inferenceConfig"]
+    assert (cfg["maxTokens"], cfg["temperature"], cfg["topP"]) == (2200, 1.0, 0.95)

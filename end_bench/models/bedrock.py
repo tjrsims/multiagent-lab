@@ -136,6 +136,7 @@ class BedrockTextModel(language_model.LanguageModel):
         daily_cap_max_wait_seconds: float = 6 * 3600.0,
         token_budget_per_day: int | None = None,
         clock: Callable[[], float] = time.time,
+        honor_caller_sampling: bool = True,
     ) -> None:
         if not isinstance(model_id, str) or not model_id.strip():
             raise ValueError("model_id must be a non-empty string")
@@ -178,6 +179,13 @@ class BedrockTextModel(language_model.LanguageModel):
         # Optional pacing under a known cap: a sliding 24 hour window of tokens.
         self.token_budget_per_day = token_budget_per_day
         self._clock = clock
+        # Direct callers (the judge, tests) mean the values they pass. Inside an
+        # END-Bench run the caller is Concordia's act component asking for its
+        # own defaults on every call (temperature 1.0, top_p 0.95, 2,200
+        # tokens); the run builds the adapter with honor_caller_sampling=False
+        # so the run spec's settings are what gets sent and the caller's values
+        # are recorded only as requested.
+        self.honor_caller_sampling = bool(honor_caller_sampling)
         self._token_window: deque[tuple[float, int]] = deque()
         self.budget_waits = 0
         self.budget_wait_seconds = 0.0
@@ -313,13 +321,19 @@ class BedrockTextModel(language_model.LanguageModel):
         self._call_count += 1
         self._last_prompt = prompt
         requested_max_tokens = max_tokens
-        effective_max_tokens = int(max_tokens) if max_tokens is not None else self.default_max_tokens
+        use_caller = self.honor_caller_sampling
+        effective_max_tokens = (
+            int(max_tokens) if (use_caller and max_tokens is not None) else self.default_max_tokens
+        )
         effective_temperature = (
-            float(temperature) if temperature is not None else self.default_temperature
+            float(temperature) if (use_caller and temperature is not None) else self.default_temperature
         )
         effective_temperature = min(max(effective_temperature, 0.0), 1.0)
         requested_top_p = float(top_p) if top_p is not None else (self.default_top_p if self.default_top_p is not None else 1.0)
-        effective_top_p = None if self.anthropic else (float(top_p) if top_p is not None else self.default_top_p)  # None omits topP
+        effective_top_p = (
+            None if self.anthropic  # None omits topP
+            else (float(top_p) if (use_caller and top_p is not None) else self.default_top_p)
+        )
         self._respect_token_budget()
         cap_waits_before = self.daily_cap_waits
         started = time.monotonic()

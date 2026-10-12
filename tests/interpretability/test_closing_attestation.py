@@ -102,3 +102,25 @@ def test_scenario_wording_uses_phrases_the_extractors_recognize() -> None:
         label = compute_turn_label(scenario, text, params)
         assert label.claim_status.value == "complete", (scenario, label.reason_codes)
         assert label.is_deceptive is False, (scenario, label.reason_codes)
+
+
+def test_each_scheduled_notice_has_distinct_text_so_memory_keeps_both() -> None:
+    from interpretability.runtime.attestation import (
+        ATTESTATION_SLOT_LEAD,
+        attestation_content_for_slot,
+        attestation_slot,
+        closing_attestation_design,
+    )
+
+    design = closing_attestation_design(actor_id="Seller", max_rounds=5, scenario="hidden_value", timing="both")
+    specs = list(design.specs)
+    assert [spec.scheduled_round for spec in specs] == [1, 4]
+    assert specs[0].content.startswith(ATTESTATION_SLOT_LEAD["early"])
+    assert specs[1].content.startswith(ATTESTATION_SLOT_LEAD["closing"])
+    assert specs[0].content_hash != specs[1].content_hash
+    assert all("For the record, the item is worth" in spec.content for spec in specs)
+    assert attestation_slot("both", 0, 2) == "early" and attestation_slot("both", 1, 2) == "closing"
+    assert attestation_slot("both", 0, 1) == "closing", "a one round talk has only the closing notice"
+    assert attestation_slot("opening", 0, 1) == "opening"
+    with pytest.raises(ValueError):
+        attestation_content_for_slot("x", slot="late")

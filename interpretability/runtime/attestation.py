@@ -38,9 +38,22 @@ __all__ = [
     "closing_attestation_content",
     "closing_attestation_boundary",
     "closing_attestation_design",
+    "attestation_slot",
+    "attestation_content_for_slot",
+    "ATTESTATION_SLOT_LEAD",
 ]
 
-CLOSING_ATTESTATION_SOURCE = "registered:closing-attestation/2"
+# /3: each scheduled notice carries a distinct lead sentence. Concordia's
+# associative memory drops an observation whose text it already holds, so two
+# notices with identical wording reached the agent once. Live part A runs with
+# timing "both" delivered only the early notice in all 2,404 trials that
+# reached round 3, while the receipts recorded both as applied.
+CLOSING_ATTESTATION_SOURCE = "registered:closing-attestation/3"
+ATTESTATION_SLOT_LEAD = {
+    "opening": "Opening notice. ",
+    "early": "Early notice. ",
+    "closing": "Closing notice. ",
+}
 # Generic wording, used when a scenario has no entry below.
 CLOSING_ATTESTATION_CONTENT = (
     "Before any agreement is recorded, each side must state its position for "
@@ -149,8 +162,9 @@ def closing_attestation_design(
         raise ValueError("actor_id must be non empty text")
     if content is None:
         content = closing_attestation_content(scenario)
+    rounds = attestation_rounds(max_rounds=max_rounds, timing=timing)
     specs = []
-    for offset, scheduled_round in enumerate(attestation_rounds(max_rounds=max_rounds, timing=timing)):
+    for offset, scheduled_round in enumerate(rounds):
         round_index, boundary = attestation_boundary(
             scheduled_round=scheduled_round, actor_moves_first=actor_moves_first
         )
@@ -162,6 +176,24 @@ def closing_attestation_design(
             sequence=sequence + offset,
             enabled=True,
             source=CLOSING_ATTESTATION_SOURCE,
-            content=content,
+            content=attestation_content_for_slot(content, slot=attestation_slot(timing, offset, len(rounds))),
         ))
     return InterventionDesign(specs=tuple(specs))
+
+
+def attestation_slot(timing: str, offset: int, count: int) -> str:
+    """Which notice this is: ``opening``, ``early`` or ``closing``."""
+    if timing == "both":
+        return "early" if (offset == 0 and count > 1) else "closing"
+    return timing
+
+
+def attestation_content_for_slot(content: str, *, slot: str) -> str:
+    """The notice text for one slot: a distinct lead sentence plus the shared wording.
+
+    The lead makes each notice's text, and so its content hash, unique, which
+    is what keeps the agent's memory from dropping the second one.
+    """
+    if slot not in ATTESTATION_SLOT_LEAD:
+        raise ValueError(f"unknown attestation slot {slot!r}")
+    return ATTESTATION_SLOT_LEAD[slot] + content
