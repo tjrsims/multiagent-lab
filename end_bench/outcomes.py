@@ -160,6 +160,12 @@ class LyingPaysCell:
     difference: ClusteredEstimate | None
     agreement_rate_lying: float | None
     agreement_rate_honest: float | None
+    median_share_lying: float | None = None
+    median_share_honest: float | None = None
+    n_priced: int = 0
+    # ZOPA shares outside [0, 1] (a price outside the bargaining range);
+    # they pull the means, so their count is reported next to them.
+    n_out_of_range: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -168,10 +174,54 @@ class LyingPaysCell:
             "n_honest": self.n_honest,
             "mean_share_lying": self.mean_share_lying,
             "mean_share_honest": self.mean_share_honest,
+            "median_share_lying": self.median_share_lying,
+            "median_share_honest": self.median_share_honest,
+            "n_priced": self.n_priced,
+            "n_out_of_range": self.n_out_of_range,
             "difference": self.difference.to_dict() if self.difference is not None else None,
             "agreement_rate_lying": self.agreement_rate_lying,
             "agreement_rate_honest": self.agreement_rate_honest,
         }
+
+
+def difference_of_means(
+    lying: Sequence[tuple[str, float]],
+    honest: Sequence[tuple[str, float]],
+    *,
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+) -> ClusteredEstimate:
+    """``mean(lying) - mean(honest)`` with a family clustered bootstrap interval.
+
+    Families are resampled with replacement and the difference of means is
+    recomputed inside every resample. (The earlier estimator fixed the group
+    weights from the full sample, so thirty identical shares gave an interval
+    of plus or minus 0.375 around a true difference of zero.)
+    """
+    if not lying or not honest:
+        raise ValueError("both groups need at least one priced trial")
+    by_family: dict[str, list[tuple[bool, float]]] = defaultdict(list)
+    for family, share in lying:
+        by_family[str(family)].append((True, float(share)))
+    for family, share in honest:
+        by_family[str(family)].append((False, float(share)))
+    families = sorted(by_family)
+    rng = np.random.default_rng(seed)
+    draws: list[float] = []
+    for _ in range(n_bootstrap):
+        chosen = rng.choice(len(families), size=len(families), replace=True)
+        l_vals, h_vals = [], []
+        for index in chosen:
+            for is_lying, share in by_family[families[index]]:
+                (l_vals if is_lying else h_vals).append(share)
+        if l_vals and h_vals:
+            draws.append(float(np.mean(l_vals) - np.mean(h_vals)))
+    value = float(np.mean([s for _, s in lying]) - np.mean([s for _, s in honest]))
+    low, high = (np.quantile(draws, [0.025, 0.975]) if draws else (float("nan"), float("nan")))
+    return ClusteredEstimate(
+        value=value, ci_low=float(low), ci_high=float(high), n_rows=len(lying) + len(honest),
+        n_groups=len(families), n_bootstrap=n_bootstrap, n_valid_resamples=len(draws),
+    )
 
 
 def lying_pays(
@@ -194,23 +244,22 @@ def lying_pays(
             return float(np.mean(shares)) if shares else None
         def _agree(group):
             return float(np.mean([1.0 if i.agreed else 0.0 for i in group])) if group else None
+        def _median_share(group):
+            shares = [i.zopa_share for i in group if i.zopa_share is not None]
+            return float(np.median(shares)) if shares else None
         difference = None
         priced = [i for i in lying + honest if i.zopa_share is not None]
-        if len([i for i in lying if i.zopa_share is not None]) >= 1 and len([i for i in honest if i.zopa_share is not None]) >= 1 and len(priced) >= 2:
-            # Signed contribution: +share for lying, -share for honest; the clustered
-            # mean of a balanced-weight encoding estimates the difference of means.
-            n_l = len([i for i in lying if i.zopa_share is not None])
-            n_h = len([i for i in honest if i.zopa_share is not None])
-            values, groups = [], []
-            for i in priced:
-                weight = (len(priced) / n_l) if i.false_claims > 0 else -(len(priced) / n_h)
-                values.append(weight * float(i.zopa_share))
-                groups.append(str(i.trial_family_id or i.trial_id))
-            difference = clustered_mean(values, groups, n_bootstrap=n_bootstrap, seed=seed)
+        lying_pairs = [(str(i.trial_family_id or i.trial_id), float(i.zopa_share)) for i in lying if i.zopa_share is not None]
+        honest_pairs = [(str(i.trial_family_id or i.trial_id), float(i.zopa_share)) for i in honest if i.zopa_share is not None]
+        if lying_pairs and honest_pairs:
+            difference = difference_of_means(lying_pairs, honest_pairs, n_bootstrap=n_bootstrap, seed=seed)
         cells.append(LyingPaysCell(
             scenario=scenario, n_lying=len(lying), n_honest=len(honest),
             mean_share_lying=_mean_share(lying), mean_share_honest=_mean_share(honest),
             difference=difference, agreement_rate_lying=_agree(lying), agreement_rate_honest=_agree(honest),
+            median_share_lying=_median_share(lying), median_share_honest=_median_share(honest),
+            n_priced=len(priced),
+            n_out_of_range=sum(1 for i in priced if not 0.0 <= float(i.zopa_share) <= 1.0),
         ))
     return cells
 

@@ -110,3 +110,16 @@ def test_report_renders_all_sections_from_cli_artifacts(session_smoke_run, tmp_p
         render_report([])
     bad = runner.invoke(cli, ["report", "--build", "nodir", "--out", str(tmp_path / "x.md")])
     assert bad.exit_code != 0
+
+
+def test_difference_of_means_bootstrap_is_zero_width_when_groups_are_identical() -> None:
+    from end_bench.outcomes import difference_of_means
+
+    lying = [(f"f{i}", 0.5) for i in range(15)]
+    honest = [(f"h{i}", 0.5) for i in range(15)]
+    estimate = difference_of_means(lying, honest, n_bootstrap=200)
+    assert estimate.value == 0.0 and estimate.ci_low == 0.0 and estimate.ci_high == 0.0
+    shifted = difference_of_means([(f"f{i}", 0.7) for i in range(15)], honest, n_bootstrap=200)
+    assert shifted.value == pytest.approx(0.2) and shifted.ci_low == pytest.approx(0.2) and shifted.ci_high == pytest.approx(0.2)
+    with pytest.raises(ValueError):
+        difference_of_means([], honest)

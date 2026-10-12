@@ -80,15 +80,23 @@ def _behavior_table(builds: Sequence[BuildArtifacts]) -> list[str]:
 
 def _detector_table(builds: Sequence[BuildArtifacts]) -> list[str]:
     lines = ["## Detectors: AUROC on all rows vs matched pairs (test partition when available)", "",
-             "| model | detector | subset | n | AUROC | TPR@1%FPR | TPR@5%FPR |", "|---|---|---|---|---|---|---|"]
+             "Separation is max(AUROC, 1 - AUROC): a nuisance cue such as response length carries "
+             "signal in either direction, and an AUROC of 0.35 means 0.65 with the sign flipped.", "",
+             "| model | detector | subset | n | AUROC | separation | TPR@1%FPR | TPR@5%FPR |", "|---|---|---|---|---|---|---|---|"]
     for build in builds:
-        partition = build.scores.get("extras", {}).get("scoring_partition")
+        extras = build.scores.get("extras", {})
+        partition = extras.get("scoring_partition")
+        reason = extras.get("scoring_partition_reason")
+        if reason:
+            lines.insert(4, f"Note for {build.name}: {reason}.")
         for score in build.scores.get("detector_scores", []):
             tpr = score.get("tpr_at_fpr", {})
+            auroc = (score.get("auroc") or {}).get("value")
+            separation = "n/a" if not isinstance(auroc, (int, float)) else f"{max(auroc, 1.0 - auroc):.3f}{' (flipped)' if auroc < 0.5 else ''}"
             lines.append(
                 f"| {build.name} | {score.get('detector')} | {score.get('subset')}"
                 f"{'' if partition is None else f' ({partition})'} | {score.get('n_rows')} | "
-                f"{_ci(score.get('auroc'))} | {_ci(tpr.get('0.01'))} | {_ci(tpr.get('0.05'))} |"
+                f"{_ci(score.get('auroc'))} | {separation} | {_ci(tpr.get('0.01'))} | {_ci(tpr.get('0.05'))} |"
             )
     return lines
 

@@ -59,6 +59,9 @@ from interpretability.dyads.evaluation import roc_auc
 
 
 BUILD_VERSION = "benchmark-build/1"
+# Fewest trial families a held out scoring partition may have before the
+# build falls back to scoring every row and says so.
+MIN_SCORING_FAMILIES = 8
 
 
 class BenchmarkBuildError(ValueError):
@@ -253,6 +256,7 @@ def build_benchmark(
     bootstrap_seed: int = 42,
     scoring_partition: str | None = "test",
     train_probe: bool = True,
+    min_scoring_families: int = MIN_SCORING_FAMILIES,
     trusted_legacy: bool = False,
 ) -> BenchmarkBuild:
     """Run the full offline benchmark build and write its artifacts.
@@ -275,13 +279,34 @@ def build_benchmark(
     views = attach_partitions(views, split_manifest)
     populated_partitions = {a.partition for a in split_manifest.assignments}
     split_complete = split_manifest.locked and populated_partitions == {"train", "development", "test"}
+    families_by_partition: dict[str, int] = {}
+    for assignment in split_manifest.assignments:
+        families_by_partition.setdefault(assignment.partition, set()).add(assignment.trial_family_id)  # type: ignore[union-attr]
+    families_by_partition = {k: len(v) for k, v in families_by_partition.items()}  # type: ignore[arg-type]
+    scoring_partition_reason: str | None = None
     if scoring_partition is not None and (
         not split_complete or scoring_partition not in populated_partitions
     ):
         # Too few families for a held-out partition: score every row and say
         # so in the scorecard rather than silently scoring an empty subset.
+        scoring_partition_reason = "split incomplete; scored on all rows"
         scoring_partition = None
         train_probe = False
+    if scoring_partition is not None:
+        in_partition = [i for i, part in enumerate(views.partitions) if part == scoring_partition]
+        n_families = families_by_partition.get(scoring_partition, 0)
+        scenarios_present = {views.scenarios[i] for i in in_partition}
+        missing = sorted(set(views.scenarios) - scenarios_present)
+        if n_families < min_scoring_families or missing:
+            # A held out partition with a handful of clusters gives intervals
+            # that mean nothing (a live pooled build scored on 4 families).
+            scoring_partition_reason = (
+                f"{scoring_partition} holds {n_families} families"
+                + (f" and no rows for {missing}" if missing else "")
+                + f"; need at least {min_scoring_families} and every scenario; scored on all rows"
+            )
+            scoring_partition = None
+            train_probe = False
     pairs = _scoring_pairs(
         views, scoring_partition, split_manifest,
         bin_width=bin_width, pair_seed=pair_seed,
@@ -309,8 +334,17 @@ def build_benchmark(
                             "partition": scoring_partition or "all", "reason": str(error)})
 
     scores: list[DetectorScore] = []
+    scenario_array = np.asarray(views.scenarios, dtype=object)
     for name, values in detectors.items():
-        for subset, mask in (("all", None), ("paired", pair_mask)):
+        subsets: list[tuple[str, np.ndarray | None]] = [("all", None), ("paired", pair_mask)]
+        # Per scenario rows: an "all rows" AUROC pooled over scenarios mostly
+        # measures scenario base rates (hidden value is mostly lies, ultimatum
+        # mostly honest), so each scenario is scored on its own as well.
+        for scenario in sorted(set(views.scenarios)):
+            scenario_mask = scenario_array == scenario
+            subsets.append((f"all:{scenario}", scenario_mask))
+            subsets.append((f"paired:{scenario}", scenario_mask & pair_mask))
+        for subset, mask in subsets:
             result = _try_score(
                 name, values, views, subset=subset, mask=mask,
                 partition=scoring_partition, n_bootstrap=n_bootstrap,
@@ -352,6 +386,9 @@ def build_benchmark(
         extras={
             "build_version": BUILD_VERSION,
             "scoring_partition": scoring_partition,
+            "scoring_partition_reason": scoring_partition_reason,
+            "families_by_partition": families_by_partition,
+            "min_scoring_families": min_scoring_families,
             "split_complete": split_complete,
             "split_locked": split_manifest.locked,
             "probe_selection": probe_selection.to_dict() if probe_selection else None,

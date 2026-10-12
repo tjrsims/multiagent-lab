@@ -1129,6 +1129,8 @@ def benchmark():
 @click.option('--bin-width', type=float, default=5.0, show_default=True,
               help='Claim bin width for matched pairs.')
 @click.option('--split-seed', type=int, default=42, show_default=True)
+@click.option('--min-scoring-families', type=click.IntRange(min=1), default=8, show_default=True,
+              help='Fewest trial families the held out scoring split may have; below it every row is scored and the manifest says why.')
 @click.option('--n-bootstrap', type=int, default=1000, show_default=True,
               help='Family-clustered bootstrap resamples per interval.')
 @click.option('--no-probe', is_flag=True, help='Skip the linear probe on activations.')
@@ -1136,7 +1138,7 @@ def benchmark():
               help='Allow pickle-capable .pt loading only for a reviewed artifact')
 def benchmark_build(dataset_path, out_dir, label_source, rows, qc, group_key,
                     allow_legacy_runtime, bin_width, split_seed, n_bootstrap,
-                    no_probe, trust_legacy_pt):
+                    no_probe, trust_legacy_pt, min_scoring_families):
     """Project, split, pair, score, and stamp one benchmark build."""
     from interpretability.benchmark.build import (
         BenchmarkBuildError,
@@ -1156,6 +1158,7 @@ def benchmark_build(dataset_path, out_dir, label_source, rows, qc, group_key,
             allow_legacy_runtime=allow_legacy_runtime,
             bin_width=bin_width,
             split_seed=split_seed,
+            min_scoring_families=min_scoring_families,
             n_bootstrap=n_bootstrap,
             train_probe=not no_probe,
             trusted_legacy=trust_legacy_pt,

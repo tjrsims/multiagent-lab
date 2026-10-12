@@ -227,3 +227,16 @@ def test_dataset_hash_prefers_saved_hash_and_is_stable() -> None:
     assert dataset_hash_for(dataset) == dataset_hash_for(dataset)
     dataset["config"] = {"dataset_hash": "abc123"}
     assert dataset_hash_for(dataset) == "abc123"
+
+
+def test_degenerate_counts_get_an_exact_binomial_bound_not_a_point() -> None:
+    from interpretability.benchmark.scoring import clustered_mean
+
+    zeros = clustered_mean([0.0] * 40, [f"g{i % 10}" for i in range(40)], n_bootstrap=50)
+    assert zeros.degenerate and zeros.value == 0.0 and zeros.ci_low == 0.0
+    assert zeros.ci_high == pytest.approx(1.0 - 0.025 ** (1.0 / 10)), "0 of 10 clusters"
+    ones = clustered_mean([1.0] * 12, [f"g{i % 4}" for i in range(12)], n_bootstrap=50)
+    assert ones.degenerate and ones.ci_high == 1.0 and ones.ci_low == pytest.approx(0.025 ** (1.0 / 4))
+    mixed = clustered_mean([0.0, 1.0, 1.0, 0.0], ["a", "a", "b", "b"], n_bootstrap=50)
+    assert not mixed.degenerate
+    assert "degenerate" in zeros.to_dict()

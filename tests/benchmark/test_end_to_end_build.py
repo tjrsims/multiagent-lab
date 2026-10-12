@@ -52,8 +52,8 @@ def test_views_from_golden_bundle_keep_claim_bearing_twins(golden_path) -> None:
 
 
 def test_build_benchmark_writes_stable_manifest_and_oracle_sits_at_chance(golden_path, tmp_path) -> None:
-    first = build_benchmark(golden_path, tmp_path / "one", n_bootstrap=60, split_seed=3)
-    second = build_benchmark(golden_path, tmp_path / "two", n_bootstrap=60, split_seed=3)
+    first = build_benchmark(golden_path, tmp_path / "one", n_bootstrap=60, split_seed=3, min_scoring_families=1)
+    second = build_benchmark(golden_path, tmp_path / "two", n_bootstrap=60, split_seed=3, min_scoring_families=1)
     assert first.manifest.manifest_id == second.manifest.manifest_id
     for name in ("views_report", "split_manifest", "pairs", "scores", "manifest"):
         assert first.written[name].exists()
@@ -100,7 +100,7 @@ def test_benchmark_cli_builds_and_reports(golden_path, tmp_path) -> None:
     result = CliRunner().invoke(
         cli,
         ["benchmark", "build", "--dataset", str(golden_path), "--out", str(tmp_path / "out"),
-         "--n-bootstrap", "40", "--split-seed", "3"],
+         "--n-bootstrap", "40", "--split-seed", "3", "--min-scoring-families", "1"],
     )
     assert result.exit_code == 0, result.output
     assert "benchmark manifest bench_" in result.output
@@ -117,7 +117,7 @@ def test_paired_scoring_keeps_both_members_inside_the_scoring_partition(golden_p
     """Pairs built over all rows and filtered to the test split left most scored
     rows without their partner, and the stated claim oracle read 0.89 on that
     unbalanced subset of a pooled live build while sitting at 0.50 over all pairs."""
-    result = build_benchmark(golden_path, tmp_path / "scored", n_bootstrap=30, split_seed=3, train_probe=False)
+    result = build_benchmark(golden_path, tmp_path / "scored", n_bootstrap=30, split_seed=3, train_probe=False, min_scoring_families=1)
     partitions = result.views.partitions
     pairs = result.pairs
     assert pairs.parameters["scoring_partition"] == "test"
@@ -131,3 +131,36 @@ def test_paired_scoring_keeps_both_members_inside_the_scoring_partition(golden_p
     unpartitioned = build_benchmark(golden_path, tmp_path / "all", n_bootstrap=30, split_seed=3, train_probe=False, scoring_partition=None)
     assert "scoring_partition" not in unpartitioned.pairs.parameters
     assert unpartitioned.pairs.n_pairs == pairs.parameters["pairs_over_all_rows"]
+
+
+def test_build_scores_each_scenario_and_records_family_counts(golden_path, tmp_path) -> None:
+    result = build_benchmark(golden_path, tmp_path / "scenario_rows", n_bootstrap=30, split_seed=3, train_probe=False)
+    subsets = {s.subset for s in result.scorecard.detector_scores}
+    scenarios = set(result.views.scenarios)
+    assert {f"all:{sc}" for sc in scenarios} <= subsets
+    extras = result.scorecard.extras
+    assert extras["min_scoring_families"] == 8
+    assert set(extras["families_by_partition"]) <= {"train", "development", "test"}
+    # The golden dataset has 10 families, so its test split cannot hold 8: scored on all rows and says why.
+    assert extras["scoring_partition"] is None and "need at least 8" in extras["scoring_partition_reason"]
+
+
+def test_pooled_views_stratify_by_scenario_only() -> None:
+    from interpretability.benchmark.splits import records_from_views
+    from interpretability.benchmark.views import BenchmarkViews
+    import numpy as np
+
+    n = 6
+    views = BenchmarkViews(
+        labels=np.array([0, 1, 0, 1, 0, 1]), responses=tuple("r" * n), private_facts=tuple({} for _ in range(n)),
+        scenarios=("hidden_value",) * 3 + ("ultimatum_bluff",) * 3,
+        group_ids=np.array([f"g{i}" for i in range(n)], dtype=object), activations={},
+        trial_ids=tuple(f"t{i}" for i in range(n)), incentive_conditions=("high", "low", "penalty") * 2,
+        counterpart_types=("default", "skeptical", "informed") * 2, pair_roles=("above", "below", None) * 2,
+        sources=("run-a",) * n,
+    )
+    records = records_from_views(views)
+    assert {r.incentive_condition for r in records} == {"pooled"}
+    assert {r.counterpart_policy for r in records} == {"pooled"} and {r.role_orientation for r in records} == {"pooled"}
+    single = records_from_views(BenchmarkViews(**{**views.__dict__, "sources": ()}))
+    assert {r.incentive_condition for r in single} == {"high", "low", "penalty"}

@@ -150,11 +150,13 @@ def smoke(**options):
 @click.option('--rows', type=click.Choice(['claim_bearing', 'all']), default='claim_bearing', show_default=True)
 @click.option('--bin-width', type=float, default=5.0, show_default=True)
 @click.option('--split-seed', type=int, default=42, show_default=True)
+@click.option('--min-scoring-families', type=click.IntRange(min=1), default=8, show_default=True,
+              help='Fewest trial families the held out scoring split may have; below it every row is scored and the manifest says why.')
 @click.option('--n-bootstrap', type=int, default=1000, show_default=True)
 @click.option('--no-probe', is_flag=True, help='Skip the activation probe (text datasets have none).')
 @click.option('--trust-legacy-pt', is_flag=True,
               help='Allow pickle-capable .pt loading only for a reviewed artifact')
-def build(dataset_path, out_dir, label_source, rows, bin_width, split_seed, n_bootstrap, no_probe, trust_legacy_pt):
+def build(dataset_path, out_dir, label_source, rows, bin_width, split_seed, n_bootstrap, no_probe, trust_legacy_pt, min_scoring_families):
     """Project, split, pair, score, and stamp one benchmark build."""
     from end_bench.data.text_dataset import TextDatasetError, is_text_dataset, load_text_dataset
     from interpretability.benchmark.build import BenchmarkBuildError, build_benchmark
@@ -175,6 +177,7 @@ def build(dataset_path, out_dir, label_source, rows, bin_width, split_seed, n_bo
             rows=rows,
             bin_width=bin_width,
             split_seed=split_seed,
+            min_scoring_families=min_scoring_families,
             n_bootstrap=n_bootstrap,
             train_probe=train_probe,
             trusted_legacy=trust_legacy_pt,

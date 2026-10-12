@@ -55,6 +55,10 @@ class ClusteredEstimate:
     n_bootstrap: int
     n_valid_resamples: int
     confidence: float = 0.95
+    # True when every value was identical (a count of 0 or n), so the
+    # percentile bootstrap collapses to a point; the interval then comes from
+    # an exact binomial bound with the number of clusters as the sample size.
+    degenerate: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +69,7 @@ class ClusteredEstimate:
             "n_groups": self.n_groups,
             "n_bootstrap": self.n_bootstrap,
             "n_valid_resamples": self.n_valid_resamples,
+            "degenerate": self.degenerate,
             "confidence": self.confidence,
         }
 
@@ -371,10 +376,21 @@ def _clustered_mean(values: Sequence[float], groups: Sequence[str], *, n_bootstr
         index = np.concatenate([members[unique[i]] for i in chosen])
         draws.append(float(array[index].mean()))
     low, high = np.quantile(draws, [0.025, 0.975]) if draws else (float("nan"), float("nan"))
+    degenerate = False
+    if array.size and float(array.min()) == float(array.max()) and float(array.min()) in (0.0, 1.0):
+        # Every row agrees, so resampling cannot move the mean. Report the
+        # exact Clopper Pearson bound for a count of 0 (or n) out of n
+        # clusters instead of a zero width interval.
+        degenerate = True
+        bound = 1.0 - (0.025 ** (1.0 / max(len(unique), 1)))
+        if float(array.min()) == 0.0:
+            low, high = 0.0, bound
+        else:
+            low, high = 1.0 - bound, 1.0
     return ClusteredEstimate(
         value=float(array.mean()), ci_low=float(low), ci_high=float(high),
         n_rows=int(array.shape[0]), n_groups=len(unique), n_bootstrap=n_bootstrap,
-        n_valid_resamples=len(draws),
+        n_valid_resamples=len(draws), degenerate=degenerate,
     )
 
 

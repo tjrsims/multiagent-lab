@@ -56,6 +56,13 @@ def records_from_views(
     if not views.trial_ids:
         raise BenchmarkSplitError("views carry no trial ids")
     seen: dict[str, DyadTrialRecord] = {}
+    # A pooled dataset (several runs, ``views.sources`` set) carries every
+    # policy and condition of a family across runs that lost different trials
+    # to failures, so a family's full stratum profile is unique to it and the
+    # allocator routes every singleton stratum to train (one live pooled build
+    # ended with 4 of 120 families in test). Pooled views stratify by
+    # scenario only; the family stays the leakage unit either way.
+    pooled = bool(views.sources) and any(item is not None for item in views.sources)
     for index in range(views.n):
         trial_id = _identifier(views.trial_ids[index], field_name="trial_id")
         group = _identifier(views.group_ids[index], field_name="group_id")
@@ -68,6 +75,8 @@ def records_from_views(
             views.counterpart_types[index] if views.counterpart_types else None
         ) or "default"
         role = (views.pair_roles[index] if views.pair_roles else None) or "unpaired"
+        if pooled:
+            incentive, policy, role = "pooled", "pooled", "pooled"
         record = DyadTrialRecord(
             trial_id=trial_id,
             dyad_id=group,
