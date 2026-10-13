@@ -98,10 +98,11 @@ class OpenAICompatTextModel(language_model.LanguageModel):
         self,
         model_id: str,
         *,
+        scheme: str = "openai",
         base_url: str | None = None,
         api_key: str | None = None,
-        api_key_env: str = "OPENAI_API_KEY",
-        base_url_env: str = "OPENAI_BASE_URL",
+        api_key_env: str | None = None,
+        base_url_env: str | None = None,
         max_tokens: int = 128,
         temperature: float = 0.7,
         top_p: float | None = None,
@@ -134,7 +135,14 @@ class OpenAICompatTextModel(language_model.LanguageModel):
             raise ValueError("token_budget_per_day must be a positive integer when given")
         if max_tokens_field not in ("max_tokens", "max_completion_tokens"):
             raise ValueError("max_tokens_field must be 'max_tokens' or 'max_completion_tokens'")
-        self.model_id = model_id.removeprefix("openai:")
+        if not isinstance(scheme, str) or not scheme.isalpha() or not scheme.islower():
+            raise ValueError("scheme must be lowercase letters, e.g. 'openai', 'xai', 'gemini'")
+        # The scheme names the provider in every id this adapter publishes
+        # (``xai:grok-4.3``) and picks the default environment variable names.
+        self.scheme = scheme
+        self.model_id = model_id.removeprefix(f"{scheme}:")
+        api_key_env = api_key_env or f"{scheme.upper()}_API_KEY"
+        base_url_env = base_url_env or f"{scheme.upper()}_BASE_URL"
         resolved_base = (base_url or os.environ.get(base_url_env) or DEFAULT_BASE_URL).rstrip("/")
         if not resolved_base.startswith(("https://", "http://localhost", "http://127.0.0.1")):
             raise ValueError("base_url must use https (plain http is allowed for localhost only)")
@@ -175,7 +183,7 @@ class OpenAICompatTextModel(language_model.LanguageModel):
 
     @property
     def model_name(self) -> str:
-        return f"openai:{self.model_id}"
+        return f"{self.scheme}:{self.model_id}"
 
     @property
     def call_count(self) -> int:
@@ -358,6 +366,7 @@ class OpenAICompatTextModel(language_model.LanguageModel):
         )
         provenance["effective"]["seed"] = None  # not sent; servers differ on seed support
         provenance["provider"] = "openai_compat"
+        provenance["scheme"] = self.scheme
         provenance["endpoint_host"] = self.endpoint_host
         provenance["model_id"] = self.model_id
         provenance["max_tokens_field"] = self.max_tokens_field

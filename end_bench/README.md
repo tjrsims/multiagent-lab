@@ -66,9 +66,17 @@ New to AWS: read `end_bench/aws/SETUP.md`, run `bootstrap_aws.sh` once, request 
 `end-bench bedrock-models` to see invocable ids. On EC2: `launch_ec2.sh`, `setup_ec2.sh`, then `run_text_track.sh`,
 `run_whitebox_track.sh`, `sync_s3.sh`, `build_all.sh` (see each script's header).
 
-## Other providers (OpenAI compatible endpoints)
+## Providers and the model roster
 
-`--model openai:<model>` runs the same design through `POST {OPENAI_BASE_URL}/chat/completions`, the API that OpenAI, xAI, DeepSeek, Mistral's platform, Together, Fireworks and OpenRouter serve. Set `OPENAI_BASE_URL` (default `https://api.openai.com/v1`) and `OPENAI_API_KEY` in the environment; the key is read per call and never written to any artifact, only the endpoint host is. Prices for these endpoints are not in the Bedrock price table, so their calls are recorded as unpriced unless you pass `--price-table` with keys such as `openai:gpt-5`. The adapter has no network dependency beyond the standard library and is tested offline with a fake transport. Fixed counterparts (`--counterpart-model`) accept the same schemes.
+A model is named `<scheme>:<model id>`. The scheme picks the provider from one registry (`end_bench/models/providers.py`): `bedrock` (Converse API, boto3 credentials), `scripted` (offline), and OpenAI compatible endpoints `openai`, `xai`, `gemini`, `deepseek`, `mistral`, `moonshot` (Kimi), `qwen` (Alibaba Model Studio), `zai` (GLM), `openrouter`, `together`. Each of those reads its key from `<SCHEME>_API_KEY` at call time and never writes it anywhere; `<SCHEME>_BASE_URL` overrides the endpoint for a proxy. Adding a provider is one row in the registry. `end-bench roster --providers` lists them with whether the key variable is present.
+
+The roster (`end_bench/models/roster.py`, versioned) says which models the benchmark runs on: tier, vendor, open weights, the peer deception and negotiation benchmarks that evaluated the model, and one or more routes (full specs). `@<key>` works anywhere a model is accepted and resolves to the preferred route; `@<key>/<scheme>` picks another route (`@grok-4.7/xai`). `end-bench roster --standard` prints the headline set; a route marked `CHECK` has an id that was not read from the provider's own listing and must be confirmed before a paid run. Prices for other providers live in the same table as Bedrock's, keyed by scheme, each with its source; unpriced models are counted in tokens, never guessed in dollars.
+
+```bash
+end-bench roster --standard                      # the leaderboard set with routes, id status, price, credentials
+end-bench module run deception_under_incentive --model @gpt-5.6-terra --counterpart-model @nova-pro --preset main_lite
+END_BENCH_COUNTERPART=@nova-pro scripts/run_module_batch.sh @grok-4.3 grok43 data/main_b main_lite interrogative
+```
 
 ## Benchmark modules
 

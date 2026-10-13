@@ -53,8 +53,21 @@ def _common_design_options(f):
     f = click.option('--token-budget-per-day', type=click.IntRange(min=1), default=None,
                      help='Pace the model under a daily token cap (tokens per rolling 24 hours).')(f)
     f = click.option('--counterpart-model', default=None,
-                     help="Fixed counterpart model ('bedrock:<id>' or 'scripted'); default is self play.")(f)
+                     help="Fixed counterpart model (<scheme>:<id>, @<roster key>, or 'scripted'); default is self play.")(f)
     return f
+
+
+def _resolve_model(value, option):
+    """``@key`` roster lookups and scheme validation, as a usage error on failure."""
+    if value is None:
+        return None
+    from end_bench.models.providers import ModelSpecError
+    from end_bench.models.roster import resolve_model_spec
+
+    try:
+        return resolve_model_spec(value)
+    except ModelSpecError as error:
+        raise click.UsageError(f"{option}: {error}") from error
 
 
 def _spec_from_options(model, **options):
@@ -79,7 +92,7 @@ def _spec_from_options(model, **options):
             region=options.get("region", "us-east-1"),
             run_id=options["run_id"],
             token_budget_per_day=options.get("token_budget_per_day"),
-            counterpart_model=options.get("counterpart_model"),
+            counterpart_model=_resolve_model(options.get("counterpart_model"), "--counterpart-model"),
             price_table=options.get("price_table"),
             family_seed_start=options["family_seed_start"],
         )
@@ -113,8 +126,8 @@ def _echo_result(result) -> None:
 
 @cli.command('run-text')
 @click.option('--model', required=True,
-              help="'bedrock:<model id>' (Amazon Bedrock) or 'openai:<model>' (any OpenAI compatible endpoint; "
-                   "OPENAI_BASE_URL and OPENAI_API_KEY select it).")
+              help="<scheme>:<model id> (schemes: `end-bench roster --providers`) or @<roster key>, e.g. "
+                   "bedrock:global.openai.gpt-5.6-sol, xai:grok-4.3, @claude-sonnet-5.")
 @click.option('--region', default="us-east-1", show_default=True)
 @click.option('--temperature', type=click.FloatRange(0.0, 1.0), default=0.7, show_default=True)
 @click.option('--price-table', type=click.Path(exists=True, dir_okay=False), default=None,
@@ -122,8 +135,9 @@ def _echo_result(result) -> None:
 @_common_design_options
 def run_text(model, region, temperature, price_table, **options):
     """Run a text-track design on an API model and export a text dataset."""
-    if not model.startswith(("bedrock:", "openai:")):
-        raise click.UsageError("--model must start with 'bedrock:' or 'openai:' (use `smoke` for offline runs)")
+    model = _resolve_model(model, "--model")
+    if model == "scripted":
+        raise click.UsageError("--model scripted is the offline model; use `end-bench smoke` for offline runs")
     from end_bench.run import run_text_track
 
     spec = _spec_from_options(model, region=region, temperature=temperature,
@@ -478,7 +492,7 @@ def module():
 
 @module.command('run')
 @click.argument('name')
-@click.option('--model', required=True, help="'scripted' or bedrock:<model id>.")
+@click.option('--model', required=True, help="'scripted', <scheme>:<model id>, or @<roster key>.")
 @click.option('--preset', default="pilot", show_default=True)
 @click.option('--counterpart-type', 'counterpart_types', multiple=True, default=("interrogative",),
               show_default=True, help="One run per policy (repeatable).")
@@ -501,6 +515,8 @@ def module_run(name, model, preset, counterpart_types, run_id, out_dir, region, 
     package = _load_benchmark_module(name)
     if preset not in package.PRESETS:
         raise click.UsageError(f"unknown preset {preset!r}; choose from {sorted(package.PRESETS)}")
+    model = _resolve_model(model, "--model")
+    counterpart_model = _resolve_model(counterpart_model, "--counterpart-model")
     benchmark = package.build_module()
     prefix = run_id or _time.strftime("%Y%m%d-%H%M%S")
     failures: list[tuple[str, str]] = []
@@ -635,11 +651,16 @@ def _judge_model(spec: str, region: str, cost_ledger=None):
         from end_bench.models.bedrock import BedrockTextModel
 
         return BedrockTextModel(spec, region=region, max_tokens=400, temperature=0.0, cost_ledger=cost_ledger)
-    if spec.startswith("openai:"):
-        from end_bench.models.openai_compat import OpenAICompatTextModel
+    from end_bench.models.providers import ModelSpecError, build_text_model
+    from end_bench.models.roster import resolve_model_spec
 
-        return OpenAICompatTextModel(spec, max_tokens=400, temperature=0.0, cost_ledger=cost_ledger)
-    raise click.UsageError(f"unsupported judge {spec!r}; use 'oracle', 'bedrock:<model_id>' or 'openai:<model>'")
+    try:
+        resolved = resolve_model_spec(spec)
+        if resolved == "scripted":
+            raise ModelSpecError("the scripted model is not a judge")
+        return build_text_model(resolved, max_tokens=400, temperature=0.0, cost_ledger=cost_ledger, region=region)
+    except ModelSpecError as error:
+        raise click.UsageError(f"unsupported judge {spec!r}: {error}; use 'oracle', <scheme>:<model id> or @<roster key>") from error
 
 
 def _rehash_text_dataset(dataset):
@@ -723,18 +744,54 @@ def bedrock_models(region, provider, all_providers, check_access):
                "'priced: no': tokens are counted but dollars are not until the id is in a --price-table JSON.")
 
 
+@cli.command('roster')
+@click.option('--tier', type=click.Choice(["frontier", "mid", "budget"]), default=None, help="Only this tier.")
+@click.option('--standard/--all', 'standard_only', default=False, show_default=True,
+              help="Only the standard leaderboard set, or every entry.")
+@click.option('--scheme', default=None, help="Only entries whose preferred route uses this scheme.")
+@click.option('--providers', 'show_providers', is_flag=True, help="List the provider registry instead.")
+@click.option('--json', 'as_json', is_flag=True, help="Machine readable output.")
+def roster(tier, standard_only, scheme, show_providers, as_json):
+    """The model roster (which models the benchmark runs on) and the provider registry."""
+    from end_bench.models.providers import PROVIDERS
+    from end_bench.models.roster import MODEL_ROSTER, MODEL_ROSTER_VERSION, format_roster, roster_json
+
+    if show_providers:
+        if as_json:
+            click.echo(json.dumps([{**vars(p), "base_url_env": p.base_url_env, "credentials": p.credentials_status()}
+                                   for p in PROVIDERS.values()], indent=2))
+            return
+        click.echo(f"{'scheme':11s} {'provider':30s} {'kind':13s} {'key variable':18s} {'creds':8s} base url")
+        for p in PROVIDERS.values():
+            click.echo(f"{p.scheme:11s} {p.display[:30]:30s} {p.kind:13s} {(p.key_env or '-'):18s} "
+                       f"{p.credentials_status():8s} {p.base_url or '-'}")
+        click.echo("\nUse <scheme>:<model id> as --model; <SCHEME>_BASE_URL overrides the base url for a proxy.")
+        return
+    entries = [e for e in MODEL_ROSTER.values()
+               if (not standard_only or e.standard) and (tier is None or e.tier == tier)
+               and (scheme is None or e.preferred.scheme == scheme)]
+    if as_json:
+        click.echo(roster_json(entries))
+        return
+    click.echo(f"model roster {MODEL_ROSTER_VERSION}: {len(entries)} entries")
+    click.echo(format_roster(entries))
+    click.echo("Use @<key> (or @<key>/<scheme>) anywhere a --model is accepted.")
+
+
 @cli.command('info')
 def info():
     """Print versions that stamp every run and build."""
     from end_bench import END_BENCH_VERSION
     from end_bench.data.text_dataset import TEXT_DATASET_SCHEMA_VERSION
     from end_bench.models.pricing import PRICE_TABLE_VERSION
+    from end_bench.models.roster import MODEL_ROSTER_VERSION
     from interpretability.schema_registry import schema_registry, schema_registry_checksum
 
     payload = {
         "end_bench_version": END_BENCH_VERSION,
         "text_dataset_schema": TEXT_DATASET_SCHEMA_VERSION,
         "price_table_version": PRICE_TABLE_VERSION,
+        "model_roster_version": MODEL_ROSTER_VERSION,
         "schema_registry_checksum": schema_registry_checksum(),
         "schema_registry": schema_registry(),
     }

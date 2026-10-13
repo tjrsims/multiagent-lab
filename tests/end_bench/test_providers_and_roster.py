@@ -1,0 +1,201 @@
+"""Provider registry and model roster: pure, offline, no keys read beyond presence."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from end_bench.models.bedrock import BedrockTextModel
+from end_bench.models.openai_compat import OpenAICompatTextModel
+from end_bench.models.pricing import (
+    DEFAULT_PRICES_PER_MTOK,
+    PRICE_SOURCES,
+    CostLedger,
+    normalize_model_id,
+    price_is_verified,
+    price_source,
+    resolve_price,
+)
+from end_bench.models.providers import (
+    PROVIDERS,
+    ModelSpecError,
+    ProviderSpec,
+    build_text_model,
+    known_schemes,
+    parse_model_spec,
+)
+from end_bench.models.roster import (
+    MODEL_ROSTER,
+    MODEL_ROSTER_VERSION,
+    PEER_BENCHMARKS,
+    TIERS,
+    RosterEntry,
+    Route,
+    format_roster,
+    resolve_model_spec,
+    roster_json,
+    standard_roster,
+)
+from end_bench.models.scripted import ScriptedTextModel
+
+
+def test_registry_rows_are_well_formed_and_parse() -> None:
+    assert {"bedrock", "scripted", "openai", "xai", "gemini", "deepseek", "mistral", "moonshot", "qwen", "zai"} <= set(known_schemes())
+    for provider in PROVIDERS.values():
+        if provider.kind == "openai_compat":
+            assert provider.base_url.startswith("https://") and provider.key_env.endswith("_API_KEY")
+            assert provider.base_url_env == f"{provider.scheme.upper()}_BASE_URL"
+    xai, model_id = parse_model_spec("xai:grok-4.3")
+    assert xai.display == "xAI" and model_id == "grok-4.3"
+    assert parse_model_spec("scripted")[0].kind == "scripted"
+    with pytest.raises(ModelSpecError, match="unsupported model spec"):
+        parse_model_spec("azure:gpt")
+    with pytest.raises(ModelSpecError, match="no model id"):
+        parse_model_spec("xai:")
+    with pytest.raises(ModelSpecError):
+        parse_model_spec("scripted:x")
+    with pytest.raises(ValueError, match="base_url and key_env"):
+        ProviderSpec("foo", "Foo", "openai_compat")
+
+
+def test_factory_builds_each_kind_with_provider_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("XAI_BASE_URL", raising=False)
+    model = build_text_model("xai:grok-4.3", max_tokens=160, temperature=0.7, cost_ledger=CostLedger(), honor_caller_sampling=False)
+    assert isinstance(model, OpenAICompatTextModel)
+    assert model.model_name == "xai:grok-4.3" and model.endpoint_host == "api.x.ai"
+    assert model._api_key_env == "XAI_API_KEY" and model.honor_caller_sampling is False
+    gemini = build_text_model("gemini:gemini-3.1-pro-preview", max_tokens=160, temperature=0.7)
+    assert gemini.base_url.endswith("/v1beta/openai") and gemini.endpoint_host == "generativelanguage.googleapis.com"
+    assert gemini.model_name == "gemini:gemini-3.1-pro-preview" and gemini._api_key_env == "GEMINI_API_KEY"
+    qwen = build_text_model("qwen:qwen3.6-plus", max_tokens=160, temperature=0.7)
+    assert qwen._api_key_env == "DASHSCOPE_API_KEY" and "dashscope-intl" in qwen.base_url
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://proxy.example.test/v1")
+    deepseek = build_text_model("deepseek:deepseek-v4-pro", max_tokens=160, temperature=0.7)
+    assert deepseek.endpoint_host == "proxy.example.test", "a <SCHEME>_BASE_URL override wins"
+    bedrock = build_text_model("bedrock:us.amazon.nova-pro-v1:0", max_tokens=160, temperature=0.7, region="us-west-2")
+    assert isinstance(bedrock, BedrockTextModel) and bedrock.region == "us-west-2" and bedrock.model_id == "us.amazon.nova-pro-v1:0"
+    assert isinstance(build_text_model("scripted", max_tokens=160, temperature=0.7), ScriptedTextModel)
+    with pytest.raises(ModelSpecError):
+        build_text_model("azure:gpt", max_tokens=160, temperature=0.7)
+
+
+def test_scheme_aware_adapter_publishes_its_scheme_in_records_and_ledger(tmp_path) -> None:
+    from tests.end_bench.test_openai_compat_adapter import FakeTransport, _scoped
+
+    ledger = CostLedger(path=tmp_path / "cost.jsonl")
+    model = OpenAICompatTextModel("xai:grok-4.3", scheme="xai", base_url="https://api.x.ai/v1", api_key="k",
+                                  transport=FakeTransport(usage=(1_000_000, 1_000_000)), cost_ledger=ledger)
+    _, records = _scoped(model, "Negotiate.")
+    assert model.model_name == "xai:grok-4.3" and model.model_id == "grok-4.3"
+    assert model.get_last_sampling_config()["scheme"] == "xai"
+    entry = json.loads((tmp_path / "cost.jsonl").read_text().splitlines()[0])
+    assert entry["model_id"] == "xai:grok-4.3" and entry["usd"] == pytest.approx(1.25 + 2.50)
+    assert entry["price_source"].startswith("verified")
+    assert records[0].to_dict()["effective_sampling"] and records[0].to_dict()["model_revision"] == "xai:grok-4.3"
+    with pytest.raises(ValueError, match="scheme"):
+        OpenAICompatTextModel("x", scheme="X-AI", transport=FakeTransport(), api_key="k")
+
+
+def test_price_table_keys_other_providers_by_scheme() -> None:
+    assert set(DEFAULT_PRICES_PER_MTOK) == set(PRICE_SOURCES)
+    assert normalize_model_id("xai:grok-4.3") == "xai:grok-4.3"
+    assert normalize_model_id("bedrock:us.amazon.nova-pro-v1:0") == "amazon.nova-pro-v1:0", "Bedrock colons are not schemes"
+    assert resolve_price("xai:grok-4.3") == (1.25, 2.50) and price_is_verified("xai:grok-4.3")
+    assert resolve_price("gemini:gemini-3.1-pro-preview") == (2.00, 12.00), "prefix match on the dated id"
+    assert resolve_price("gemini:gemini-3.5-flash-lite") == (0.30, 2.50), "the longer prefix wins over 3.5 Flash"
+    assert not price_is_verified("openai:gpt-5.6-sol") and price_source("openai:gpt-5.6-sol").startswith("unverified")
+    assert resolve_price("moonshot:kimi-k2.6") is None, "no price is invented"
+    assert resolve_price("bedrock:global.openai.gpt-5.6-sol") is None, "Bedrock prices for OpenAI ids are not in the table yet"
+    assert resolve_price("xai:anthropic.claude-sonnet-4-6") is None, "a scheme id never matches a Bedrock price"
+
+
+def test_roster_entries_are_consistent() -> None:
+    assert MODEL_ROSTER_VERSION.startswith("end-bench-roster/")
+    assert len(MODEL_ROSTER) >= 25
+    for key, entry in MODEL_ROSTER.items():
+        assert key == entry.key and entry.tier in TIERS
+        assert entry.routes and entry.preferred is entry.routes[0]
+        for route in entry.routes:
+            assert route.scheme in known_schemes() and route.scheme != "scripted"
+            parse_model_spec(route.spec)
+        for route in entry.routes:
+            if not route.verified:
+                assert route.note, f"{key}: an unverified route must say how to confirm it"
+        assert set(entry.peer_benchmarks) <= set(PEER_BENCHMARKS)
+    standard = standard_roster()
+    assert 15 <= len(standard) <= 20
+    vendors = {entry.vendor for entry in standard}
+    assert {"OpenAI", "Anthropic", "Google", "xAI", "DeepSeek", "Meta", "Mistral", "Amazon"} <= vendors
+    assert {entry.tier for entry in standard} == set(TIERS)
+    # Every standard entry either has an id read from the provider's own listing or says what to confirm.
+    for entry in standard:
+        assert entry.preferred.verified or entry.preferred.note
+    # Peer evidence: most of the standard set was evaluated by at least one peer deception or negotiation benchmark.
+    with_peers = [entry for entry in standard if entry.peer_benchmarks]
+    assert len(with_peers) >= 11
+    with pytest.raises(ValueError, match="tier"):
+        RosterEntry("x", "X", "V", "ultra", routes=(Route("xai:x", True, "t"),))
+    with pytest.raises(ValueError, match="unknown peer benchmarks"):
+        RosterEntry("x", "X", "V", "mid", routes=(Route("xai:x", True, "t"),), peer_benchmarks=("Nope",))
+    with pytest.raises(ModelSpecError):
+        Route("azure:x", True, "t")
+
+
+def test_roster_keys_resolve_to_specs() -> None:
+    assert resolve_model_spec("@nova-pro") == "bedrock:us.amazon.nova-pro-v1:0"
+    assert resolve_model_spec("@grok-4.7") == "bedrock:global.xai.grok-4.7"
+    assert resolve_model_spec("@grok-4.7/xai") == "xai:grok-4.7"
+    assert resolve_model_spec("@gpt-5.6-sol/openai") == "openai:gpt-5.6-sol"
+    assert resolve_model_spec("xai:grok-4.3") == "xai:grok-4.3" and resolve_model_spec("scripted") == "scripted"
+    with pytest.raises(ModelSpecError, match="unknown roster key"):
+        resolve_model_spec("@nope")
+    with pytest.raises(ModelSpecError, match="no 'xai' route"):
+        resolve_model_spec("@nova-pro/xai")
+    with pytest.raises(ModelSpecError, match="unsupported model spec"):
+        resolve_model_spec("azure:gpt")
+
+
+def test_roster_rendering_and_json(monkeypatch) -> None:
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    text = format_roster(standard_roster())
+    assert "*gpt-5.6-sol" in text and "CHECK" in text and "missing" in text and "aws" in text
+    payload = json.loads(roster_json(MODEL_ROSTER.values()))
+    assert payload["roster_version"] == MODEL_ROSTER_VERSION
+    assert {e["key"] for e in payload["entries"]} == set(MODEL_ROSTER)
+    assert payload["peer_benchmarks"]["DecepEval"]["url"].startswith("https://arxiv.org/")
+    nova = next(e for e in payload["entries"] if e["key"] == "nova-pro")
+    assert nova["routes"][0]["priced"] is True and nova["routes"][0]["verified"] is True
+
+
+def test_cli_roster_and_model_resolution(tmp_path) -> None:
+    from click.testing import CliRunner
+
+    from end_bench.cli import cli
+
+    runner = CliRunner()
+    listing = runner.invoke(cli, ["roster", "--standard"])
+    assert listing.exit_code == 0, listing.output
+    assert "gpt-5.6-sol" in listing.output and "deepseek-v4-pro" in listing.output and "claude-opus-5-5" not in listing.output
+    tier = runner.invoke(cli, ["roster", "--tier", "budget", "--json"])
+    assert tier.exit_code == 0 and all(e["tier"] == "budget" for e in json.loads(tier.output)["entries"])
+    providers = runner.invoke(cli, ["roster", "--providers"])
+    assert providers.exit_code == 0 and "GEMINI_API_KEY" in providers.output and "api.x.ai" in providers.output
+    bad = runner.invoke(cli, ["module", "run", "deception_under_incentive", "--model", "@nope", "--out", str(tmp_path)])
+    assert bad.exit_code != 0 and "unknown roster key" in bad.output
+    bad_cp = runner.invoke(cli, ["smoke", "--families", "1", "--counterpart-model", "azure:x", "--out", str(tmp_path)])
+    assert bad_cp.exit_code != 0 and "--counterpart-model" in bad_cp.output
+    offline = runner.invoke(cli, ["run-text", "--model", "scripted", "--families", "1"])
+    assert offline.exit_code != 0 and "smoke" in offline.output
+    info = runner.invoke(cli, ["info"])
+    assert info.exit_code == 0 and json.loads(info.output)["model_roster_version"] == MODEL_ROSTER_VERSION
+
+
+def test_run_spec_validates_specs_through_the_registry() -> None:
+    from end_bench.run import RunSpec, RunSpecError
+
+    assert RunSpec(model="gemini:gemini-3.1-pro-preview", counterpart_model="bedrock:us.amazon.nova-pro-v1:0").counterpart_regime == "fixed:bedrock:us.amazon.nova-pro-v1:0"
+    with pytest.raises(RunSpecError, match="unsupported model"):
+        RunSpec(model="azure:gpt")
+    with pytest.raises(RunSpecError, match="unsupported counterpart_model"):
+        RunSpec(model="scripted", counterpart_model="@nova-pro")  # roster keys resolve at the CLI, specs stay literal

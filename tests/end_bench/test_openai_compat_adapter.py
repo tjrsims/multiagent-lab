@@ -225,6 +225,6 @@ def test_cli_run_text_and_judge_accept_openai_specs() -> None:
     from end_bench.cli import _judge_model, cli
 
     result = CliRunner().invoke(cli, ["run-text", "--model", "azure:gpt", "--families", "1"])
-    assert result.exit_code != 0 and "'bedrock:' or 'openai:'" in result.output
+    assert result.exit_code != 0 and "unsupported model spec" in result.output and "bedrock" in result.output
     judge = _judge_model("openai:gpt-5", "us-east-1")
     assert judge.model_name == "openai:gpt-5" and judge.default_max_tokens == 400 and judge.default_temperature == 0.0

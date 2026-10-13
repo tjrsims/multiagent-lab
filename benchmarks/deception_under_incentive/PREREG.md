@@ -56,3 +56,7 @@ The part A runs of October 10 and 11 (Claude Sonnet 4.6, Claude Opus 4.6, Nova P
 6. **Statistics.** Pooled splits stratify by scenario, a test split needs eight or more families, detectors are scored per scenario, and the lying pays difference is a cluster bootstrap of the difference of means.
 
 Decision rule added: a leaderboard row is reported only with its counterpart regime, its extractor and rule versions, and its failed trial count from the run manifest.
+
+### Models (added October 13, 2026)
+
+The main run covers the standard roster set in `end_bench/models/roster.py` (`end-bench-roster/2026-10-13`), chosen as the union of models evaluated by two or more peer deception or negotiation benchmarks published in 2026 (DecepEval, SWE-DeceptionBench, KnownLieBench, TERMS-Bench, PieArena, MASK) plus one model per price tier from each major vendor: GPT-5.6 Sol, Terra and Luna; Claude Opus 4.8, Sonnet 5 and Haiku 4.5; Gemini 3.1 Pro and 3.5 Flash; Grok 4.3; DeepSeek V4 Pro and V4 Flash; Mistral Large 3; Nova Pro; GLM 5.3; Kimi K2.6; Qwen 3.6 Plus; Llama 4 Maverick. The fixed counterpart for every evaluated model is Nova Pro. A model whose route id is marked unverified in the roster is confirmed in the provider console before its run; a model that cannot be reached is reported as not run, never silently dropped. Each leaderboard row carries the model spec, the endpoint host for API models, the price source, and the failed trial count.

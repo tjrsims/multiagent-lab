@@ -42,8 +42,11 @@ class RunSpecError(ValueError):
     """Raised for an inconsistent run specification."""
 
 
-# Model spec schemes a run accepts beside "scripted".
-MODEL_PREFIXES = ("bedrock:", "openai:")
+# Model spec schemes a run accepts beside "scripted" come from the provider
+# registry (end_bench.models.providers); adding a provider is one row there.
+from end_bench.models.providers import ModelSpecError, build_text_model, known_schemes, parse_model_spec
+
+MODEL_PREFIXES = tuple(f"{scheme}:" for scheme in known_schemes() if scheme != "scripted")
 
 
 @dataclass(frozen=True)
@@ -85,11 +88,17 @@ class RunSpec:
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model.strip():
             raise RunSpecError("model is required")
+        try:
+            parse_model_spec(self.model)
+        except ModelSpecError as error:
+            raise RunSpecError(f"unsupported model: {error}") from error
         if self.counterpart_model is not None:
             if not isinstance(self.counterpart_model, str) or not self.counterpart_model.strip():
-                raise RunSpecError("counterpart_model must be a non empty string when given")
-            if self.counterpart_model != "scripted" and not self.counterpart_model.startswith(MODEL_PREFIXES):
-                raise RunSpecError("unsupported counterpart_model; use 'bedrock:<model_id>', 'openai:<model>' or 'scripted'")
+                raise RunSpecError("unsupported counterpart_model: it must be a non empty string when given")
+            try:
+                parse_model_spec(self.counterpart_model)
+            except ModelSpecError as error:
+                raise RunSpecError(f"unsupported counterpart_model: {error}") from error
         if not self.scenarios:
             raise RunSpecError("at least one scenario is required")
         unknown = set(self.conditions) - SUPPORTED_CONDITIONS
@@ -123,38 +132,24 @@ class RunSpec:
 
 
 def _build_model(spec: RunSpec, ledger: CostLedger, model_spec: str | None = None):
-    """The acting model, or the model named by ``model_spec`` (the counterpart)."""
+    """The acting model, or the model named by ``model_spec`` (the counterpart).
+
+    Dispatch lives in the provider registry. The run spec's sampling values,
+    not Concordia's per call defaults, are what every adapter sends.
+    """
     name = spec.model if model_spec is None else model_spec
-    if name == "scripted":
-        from end_bench.models.scripted import ScriptedTextModel
-
-        return ScriptedTextModel(max_tokens=spec.max_tokens, cost_ledger=ledger)
-    if name.startswith("bedrock:"):
-        from end_bench.models.bedrock import BedrockTextModel
-
-        return BedrockTextModel(
-            name,
-            region=spec.region,
-            max_tokens=spec.max_tokens,
-            temperature=spec.temperature,
-            cost_ledger=ledger,
-            token_budget_per_day=spec.token_budget_per_day,
-            honor_caller_sampling=False,  # the run spec, not Concordia's per call defaults, is sent
-        )
-    if name.startswith("openai:"):
-        from end_bench.models.openai_compat import OpenAICompatTextModel
-
-        return OpenAICompatTextModel(
+    try:
+        return build_text_model(
             name,
             max_tokens=spec.max_tokens,
             temperature=spec.temperature,
             cost_ledger=ledger,
             token_budget_per_day=spec.token_budget_per_day,
             honor_caller_sampling=False,
+            region=spec.region,
         )
-    raise RunSpecError(
-        f"unsupported model {name!r}; use 'bedrock:<model_id>', 'openai:<model>' or 'scripted'"
-    )
+    except ModelSpecError as error:
+        raise RunSpecError(f"unsupported model: {error}") from error
 
 
 def summarize_trials(results: Mapping[str, Any]) -> dict[str, Any]:

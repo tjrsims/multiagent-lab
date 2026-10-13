@@ -27,7 +27,8 @@ import time
 from typing import Any, Mapping
 
 
-PRICE_TABLE_VERSION = "bedrock-prices/2026-10-09"
+# Bedrock entries date from 2026-10-09; the other providers were added 2026-10-13.
+PRICE_TABLE_VERSION = "end-bench-prices/2026-10-13"
 
 _PRICELIST = "verified: AWS Price List API, AmazonBedrock us-east-1 on-demand standard, 2026-10-09"
 _ANTHROPIC = (
@@ -49,6 +50,27 @@ PRICE_SOURCES: Mapping[str, str] = {
     "amazon.nova-micro": _PRICELIST,
     "amazon.nova-premier": "unverified: not present in the us-east-1 Price List dump",
     "scripted": "offline: free by definition",
+    # Other providers, keyed by scheme. "verified" means read from the vendor's
+    # own pricing page on the date given; "unverified" means a third party summary.
+    "xai:grok-4.3": "verified: docs.x.ai models page read 2026-10-13 (prompts under 200k tokens)",
+    "xai:grok-4.5": "verified: docs.x.ai models page read 2026-10-13 (prompts under 200k tokens)",
+    "xai:grok-4.6": "verified: docs.x.ai models page read 2026-10-13 (prompts under 200k tokens)",
+    "xai:grok-4.7": "verified: docs.x.ai models page read 2026-10-13 (prompts under 200k tokens)",
+    "gemini:gemini-3.1-pro": "verified: ai.google.dev pricing page read 2026-10-13 (prompts up to 200k tokens)",
+    "gemini:gemini-3.1-flash-lite": "verified: ai.google.dev pricing page read 2026-10-13",
+    "gemini:gemini-3.5-flash-lite": "verified: ai.google.dev pricing page read 2026-10-13",
+    "gemini:gemini-3.5-flash": "unverified: third party summaries dated 2026-08-25; absent from the Google pricing page read 2026-10-13",
+    "gemini:gemini-2.5-pro": "verified: ai.google.dev pricing page read 2026-10-13 (prompts up to 200k tokens)",
+    "gemini:gemini-2.5-flash": "verified: ai.google.dev pricing page read 2026-10-13",
+    "deepseek:deepseek-v4-pro": "verified: api-docs.deepseek.com pricing read 2026-10-13, peak rate for cache misses (off peak is half)",
+    "deepseek:deepseek-flash": "verified: api-docs.deepseek.com pricing read 2026-10-13, peak rate for cache misses (off peak is half)",
+    "openai:gpt-5.6-sol": "unverified: third party summaries of the OpenAI list price read 2026-10-13 disagree (4/20 vs 5/30); the higher is kept",
+    "openai:gpt-5.6-terra": "unverified: third party summaries of the OpenAI list price read 2026-10-13",
+    "openai:gpt-5.6-luna": "unverified: third party summaries of the OpenAI list price read 2026-10-13",
+    "openai:gpt-5.5": "unverified: third party summaries of the OpenAI list price read 2026-10-13",
+    "mistral:mistral-large-latest": "unverified: third party summaries read 2026-10-13; equals the Bedrock Price List for Mistral Large 3",
+    "mistral:mistral-medium-latest": "unverified: third party summaries read 2026-10-13",
+    "mistral:mistral-small-latest": "unverified: third party summaries read 2026-10-13",
 }
 
 DEFAULT_PRICES_PER_MTOK: Mapping[str, tuple[float, float]] = {
@@ -67,6 +89,26 @@ DEFAULT_PRICES_PER_MTOK: Mapping[str, tuple[float, float]] = {
     "amazon.nova-premier": (2.50, 12.50),
     # Offline scripted model: free by definition, so smoke runs are "priced".
     "scripted": (0.0, 0.0),
+    # Other providers (USD per 1M tokens, input, output); see PRICE_SOURCES.
+    "xai:grok-4.3": (1.25, 2.50),
+    "xai:grok-4.5": (2.00, 6.00),
+    "xai:grok-4.6": (2.00, 6.00),
+    "xai:grok-4.7": (2.00, 6.00),
+    "gemini:gemini-3.1-pro": (2.00, 12.00),
+    "gemini:gemini-3.1-flash-lite": (0.25, 1.50),
+    "gemini:gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini:gemini-3.5-flash": (1.50, 9.00),
+    "gemini:gemini-2.5-pro": (1.25, 10.00),
+    "gemini:gemini-2.5-flash": (0.30, 2.50),
+    "deepseek:deepseek-v4-pro": (1.32, 3.96),
+    "deepseek:deepseek-flash": (0.30, 1.20),
+    "openai:gpt-5.6-sol": (5.00, 30.00),
+    "openai:gpt-5.6-terra": (2.00, 12.00),
+    "openai:gpt-5.6-luna": (0.20, 1.20),
+    "openai:gpt-5.5": (5.00, 30.00),
+    "mistral:mistral-large-latest": (0.50, 1.50),
+    "mistral:mistral-medium-latest": (1.50, 7.50),
+    "mistral:mistral-small-latest": (0.15, 0.60),
 }
 
 
@@ -97,9 +139,11 @@ def normalize_model_id(model_id: str) -> str:
     normalized = model_id.strip()
     if normalized.startswith("bedrock:"):
         normalized = normalized[len("bedrock:"):]
-    if normalized.startswith("openai:"):
-        # OpenAI compatible ids keep their scheme so a custom table can key on
-        # "openai:<model>"; they are never matched against the Bedrock prices.
+    scheme, sep, _rest = normalized.partition(":")
+    if sep and scheme.isalpha() and scheme != "bedrock":
+        # Another provider's id keeps its scheme ("xai:grok-4.3") so the table
+        # keys on it; it is never matched against the Bedrock prices. Bedrock
+        # ids with a colon ("amazon.nova-pro-v1:0") have a dot before it.
         return normalized
     for prefix in INFERENCE_PROFILE_PREFIXES:
         if normalized.startswith(prefix):
