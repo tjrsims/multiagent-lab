@@ -42,11 +42,15 @@ class RunSpecError(ValueError):
     """Raised for an inconsistent run specification."""
 
 
+# Model spec schemes a run accepts beside "scripted".
+MODEL_PREFIXES = ("bedrock:", "openai:")
+
+
 @dataclass(frozen=True)
 class RunSpec:
     """One text-track experimental design."""
 
-    model: str                                  # "bedrock:<model_id>" or "scripted"
+    model: str                                  # "bedrock:<model_id>", "openai:<model>" or "scripted"
     scenarios: tuple[str, ...] = ("hidden_value", "capability_bluff", "info_withholding", "ultimatum_bluff")
     conditions: tuple[str, ...] = DEFAULT_CONDITIONS
     families: int = 30
@@ -84,8 +88,8 @@ class RunSpec:
         if self.counterpart_model is not None:
             if not isinstance(self.counterpart_model, str) or not self.counterpart_model.strip():
                 raise RunSpecError("counterpart_model must be a non empty string when given")
-            if self.counterpart_model != "scripted" and not self.counterpart_model.startswith("bedrock:"):
-                raise RunSpecError("unsupported counterpart_model; use 'bedrock:<model_id>' or 'scripted'")
+            if self.counterpart_model != "scripted" and not self.counterpart_model.startswith(MODEL_PREFIXES):
+                raise RunSpecError("unsupported counterpart_model; use 'bedrock:<model_id>', 'openai:<model>' or 'scripted'")
         if not self.scenarios:
             raise RunSpecError("at least one scenario is required")
         unknown = set(self.conditions) - SUPPORTED_CONDITIONS
@@ -137,8 +141,19 @@ def _build_model(spec: RunSpec, ledger: CostLedger, model_spec: str | None = Non
             token_budget_per_day=spec.token_budget_per_day,
             honor_caller_sampling=False,  # the run spec, not Concordia's per call defaults, is sent
         )
+    if name.startswith("openai:"):
+        from end_bench.models.openai_compat import OpenAICompatTextModel
+
+        return OpenAICompatTextModel(
+            name,
+            max_tokens=spec.max_tokens,
+            temperature=spec.temperature,
+            cost_ledger=ledger,
+            token_budget_per_day=spec.token_budget_per_day,
+            honor_caller_sampling=False,
+        )
     raise RunSpecError(
-        f"unsupported model {name!r}; use 'bedrock:<model_id>' or 'scripted'"
+        f"unsupported model {name!r}; use 'bedrock:<model_id>', 'openai:<model>' or 'scripted'"
     )
 
 
@@ -273,6 +288,11 @@ def run_text_track(
         # played both sides; a leaderboard pools runs within one regime only.
         "counterpart_model": spec.counterpart_model or spec.model,
         "counterpart_regime": spec.counterpart_regime,
+        # Endpoint hosts for API models (never keys); None for Bedrock and scripted.
+        "model_endpoints": {
+            "actor": getattr(model, "endpoint_description", None),
+            "counterpart": getattr(counterpart, "endpoint_description", None) if counterpart is not None else None,
+        },
         # What the adapter sends on every acting call. Concordia asks for its
         # own defaults per call; the adapter ignores them and sends these.
         "sampling": {

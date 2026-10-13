@@ -97,6 +97,10 @@ def normalize_model_id(model_id: str) -> str:
     normalized = model_id.strip()
     if normalized.startswith("bedrock:"):
         normalized = normalized[len("bedrock:"):]
+    if normalized.startswith("openai:"):
+        # OpenAI compatible ids keep their scheme so a custom table can key on
+        # "openai:<model>"; they are never matched against the Bedrock prices.
+        return normalized
     for prefix in INFERENCE_PROFILE_PREFIXES:
         if normalized.startswith(prefix):
             normalized = normalized[len(prefix):]

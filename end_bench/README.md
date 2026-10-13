@@ -66,6 +66,10 @@ New to AWS: read `end_bench/aws/SETUP.md`, run `bootstrap_aws.sh` once, request 
 `end-bench bedrock-models` to see invocable ids. On EC2: `launch_ec2.sh`, `setup_ec2.sh`, then `run_text_track.sh`,
 `run_whitebox_track.sh`, `sync_s3.sh`, `build_all.sh` (see each script's header).
 
+## Other providers (OpenAI compatible endpoints)
+
+`--model openai:<model>` runs the same design through `POST {OPENAI_BASE_URL}/chat/completions`, the API that OpenAI, xAI, DeepSeek, Mistral's platform, Together, Fireworks and OpenRouter serve. Set `OPENAI_BASE_URL` (default `https://api.openai.com/v1`) and `OPENAI_API_KEY` in the environment; the key is read per call and never written to any artifact, only the endpoint host is. Prices for these endpoints are not in the Bedrock price table, so their calls are recorded as unpriced unless you pass `--price-table` with keys such as `openai:gpt-5`. The adapter has no network dependency beyond the standard library and is tested offline with a fake transport. Fixed counterparts (`--counterpart-model`) accept the same schemes.
+
 ## Benchmark modules
 
 A benchmark lives under `benchmarks/<name>/` and passes a `BenchmarkModule` (policy registry, label tracks, closing attestation) into `run_text_track(spec, out, module=...)`. Run one with `end-bench module run <name> --model bedrock:<id> --preset pilot --counterpart-type interrogative`, then `end-bench module leaderboard <name> runs/<id>...`.

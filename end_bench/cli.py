@@ -113,16 +113,17 @@ def _echo_result(result) -> None:
 
 @cli.command('run-text')
 @click.option('--model', required=True,
-              help="Bedrock model id, e.g. 'bedrock:anthropic.claude-sonnet-4-6'.")
+              help="'bedrock:<model id>' (Amazon Bedrock) or 'openai:<model>' (any OpenAI compatible endpoint; "
+                   "OPENAI_BASE_URL and OPENAI_API_KEY select it).")
 @click.option('--region', default="us-east-1", show_default=True)
 @click.option('--temperature', type=click.FloatRange(0.0, 1.0), default=0.7, show_default=True)
 @click.option('--price-table', type=click.Path(exists=True, dir_okay=False), default=None,
               help='JSON {model_id_prefix: [usd_in, usd_out]} per 1M tokens.')
 @_common_design_options
 def run_text(model, region, temperature, price_table, **options):
-    """Run a text-track design on Amazon Bedrock and export a text dataset."""
-    if not model.startswith("bedrock:"):
-        raise click.UsageError("--model must start with 'bedrock:' (use `smoke` for offline runs)")
+    """Run a text-track design on an API model and export a text dataset."""
+    if not model.startswith(("bedrock:", "openai:")):
+        raise click.UsageError("--model must start with 'bedrock:' or 'openai:' (use `smoke` for offline runs)")
     from end_bench.run import run_text_track
 
     spec = _spec_from_options(model, region=region, temperature=temperature,
@@ -634,7 +635,11 @@ def _judge_model(spec: str, region: str, cost_ledger=None):
         from end_bench.models.bedrock import BedrockTextModel
 
         return BedrockTextModel(spec, region=region, max_tokens=400, temperature=0.0, cost_ledger=cost_ledger)
-    raise click.UsageError(f"unsupported judge {spec!r}; use 'oracle' or 'bedrock:<model_id>'")
+    if spec.startswith("openai:"):
+        from end_bench.models.openai_compat import OpenAICompatTextModel
+
+        return OpenAICompatTextModel(spec, max_tokens=400, temperature=0.0, cost_ledger=cost_ledger)
+    raise click.UsageError(f"unsupported judge {spec!r}; use 'oracle', 'bedrock:<model_id>' or 'openai:<model>'")
 
 
 def _rehash_text_dataset(dataset):

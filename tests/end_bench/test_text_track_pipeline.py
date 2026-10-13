@@ -370,7 +370,7 @@ def test_counterpart_model_is_validated_and_recorded(tmp_path, monkeypatch) -> N
     from end_bench.run import RunSpecError
 
     with pytest.raises(RunSpecError, match="counterpart_model"):
-        RunSpec(model="scripted", counterpart_model="openai:gpt")
+        RunSpec(model="scripted", counterpart_model="anthropic:claude")
     with pytest.raises(RunSpecError, match="counterpart_model"):
         RunSpec(model="scripted", counterpart_model="  ")
     assert RunSpec(model="scripted").counterpart_regime == "self_play"
