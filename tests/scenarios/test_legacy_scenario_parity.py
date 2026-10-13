@@ -733,3 +733,17 @@ def test_gap_hidden_value_iso_currency_notation() -> None:
         "I paid USD 39.",
         {"true_value": 40},
     ) is True
+
+
+def test_low_incentive_prompts_change_only_the_payoff() -> None:
+    """emergent-scenario/8: the low incentive condition is a flat payoff and nothing
+    else. The reputation notes it carried in three scenarios made the incentive
+    contrast a payoff change plus an honesty cue."""
+    from interpretability.scenarios.compiled import EMERGENT_SCENARIO_SPEC_VERSION
+
+    assert EMERGENT_SCENARIO_SPEC_VERSION == "emergent-scenario/8"
+    for scenario in ("ultimatum_bluff", "capability_bluff", "hidden_value", "info_withholding"):
+        params = generate_scenario_params(scenario, 17)
+        for condition in IncentiveCondition:
+            prompt = get_emergent_prompt(scenario, condition, params).lower()
+            assert "reputation" not in prompt and "shares ratings" not in prompt, (scenario, condition)

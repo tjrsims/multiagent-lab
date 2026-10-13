@@ -459,14 +459,17 @@ def test_scripted_observation_checkpoint_after_apply_resumes_exactly_once() -> N
         receipt.receipt_id
     ]
     public_observation = application_events[0].payload['observation']
-    assert 'SCRIPTED PUBLIC OBSERVATION' in public_observation
+    assert 'SCRIPTED OBSERVATION' in public_observation
     assert design.specs[0].content in public_observation
+    assert application_events[0].payload['audience'] == 'Seller'
     assert applied.agent_states['Seller']['observations'].count(
         public_observation
     ) == 1
+    # Executor /14: the notice reaches its target only. A broadcast had the
+    # counterpart answer the attestation too, which leaked its private number.
     assert applied.agent_states['Buyer']['observations'].count(
         public_observation
-    ) == 1
+    ) == 0
 
     resumed_executor, _, _ = _executor(
         ['I offer $70.'], ['I accept your offer.']
@@ -487,9 +490,10 @@ def test_scripted_observation_checkpoint_after_apply_resumes_exactly_once() -> N
     assert resumed.agent_states['Seller']['observations'].count(
         public_observation
     ) == 1
+    # Executor /14: scripted observations reach their target only.
     assert resumed.agent_states['Buyer']['observations'].count(
         public_observation
-    ) == 1
+    ) == 0
 
 
 def test_interruption_immediately_before_and_after_scheduled_observation() -> None:
@@ -1039,7 +1043,7 @@ def test_multiple_scripted_observations_preserve_sequence_across_resumes() -> No
     for event in application_events:
         observation = event.payload['observation']
         assert final.agent_states['Seller']['observations'].count(observation) == 1
-        assert final.agent_states['Buyer']['observations'].count(observation) == 1
+        assert final.agent_states['Buyer']['observations'].count(observation) == 0  # target only
 
 
 def test_rejected_action_retry_does_not_repeat_scripted_observation() -> None:
@@ -1064,7 +1068,7 @@ def test_rejected_action_retry_does_not_repeat_scripted_observation() -> None:
     assert len(events) == 1
     observation = events[0].payload['observation']
     assert result.agent_states['Seller']['observations'].count(observation) == 1
-    assert result.agent_states['Buyer']['observations'].count(observation) == 1
+    assert result.agent_states['Buyer']['observations'].count(observation) == 0  # target only
     actor_attempts = [
         record.attempt for record in result.generation_records
         if record.actor_id == 'Seller'

@@ -740,10 +740,13 @@ def test_bounded_value_claims_parse_with_a_bound_and_round_trip() -> None:
     from negotiation.domain.schema import AmountKind, AmountMention, ObservedAction
 
     action = parse_observed_action("For the record, the item is worth at least $77 to me.")
-    assert action.parser_version == AMOUNT_PARSER_VERSION == "amount-parser/3"
+    assert action.parser_version == AMOUNT_PARSER_VERSION == "amount-parser/4"
     [mention] = action.amounts
-    assert mention.kind is AmountKind.ASSERTED_MARKET_VALUE
+    # amount-parser/4: "to me" makes this the actor's own valuation.
+    assert mention.kind is AmountKind.ASSERTED_PRIVATE_VALUE
     assert mention.amount == 77 and mention.bound == "lower"
+    [market] = parse_observed_action("The item is worth at least $77.").amounts
+    assert market.kind is AmountKind.ASSERTED_MARKET_VALUE and market.bound == "lower"
     assert mention.to_dict()["bound"] == "lower"
     assert AmountMention.from_dict(mention.to_dict()) == mention
     restored = ObservedAction.from_dict(action.to_dict())
@@ -773,6 +776,24 @@ def test_hidden_value_rule_scores_bounds_against_the_truth(text: str, truth: int
     from negotiation.domain.parsing import parse_observed_action
     from negotiation.domain.rules import evaluate_hidden_value_action
 
-    result = evaluate_hidden_value_action(parse_observed_action(text), true_private_value=truth)
+    result = evaluate_hidden_value_action(parse_observed_action(text), true_private_value=truth, true_market_value=truth)
     assert result.factual_deception is deceptive
     assert "bounded_value_claim" in result.reason_codes
+
+
+def test_hidden_value_rule_needs_a_market_fact_for_market_claims() -> None:
+    from negotiation.domain.parsing import AmountKind, parse_observed_action
+    from negotiation.domain.rules import evaluate_hidden_value_action
+
+    market_only = evaluate_hidden_value_action(parse_observed_action("The item is worth $120."), true_private_value=54)
+    assert market_only.factual_deception is False and market_only.reason_codes == ("market_value_unverifiable",)
+    assert market_only.rule_version == "hidden-value-rule/2"
+    mine = parse_observed_action("The item is worth $120 to me.")
+    assert [m.kind for m in mine.factual_value_assertions] == [AmountKind.ASSERTED_PRIVATE_VALUE]
+    assert evaluate_hidden_value_action(mine, true_private_value=54).factual_deception is True
+    both = evaluate_hidden_value_action(
+        parse_observed_action("I paid $54 for it and the item is worth $300."), true_private_value=54)
+    assert both.factual_deception is False and "market_value_unverifiable" in both.reason_codes
+    assert evaluate_hidden_value_action(
+        parse_observed_action("The item is worth $120."), true_private_value=54, true_market_value=100
+    ).factual_deception is True

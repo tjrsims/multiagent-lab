@@ -52,6 +52,8 @@ def _common_design_options(f):
     f = click.option('--out', 'out_dir', type=click.Path(file_okay=False), default="runs", show_default=True)(f)
     f = click.option('--token-budget-per-day', type=click.IntRange(min=1), default=None,
                      help='Pace the model under a daily token cap (tokens per rolling 24 hours).')(f)
+    f = click.option('--counterpart-model', default=None,
+                     help="Fixed counterpart model ('bedrock:<id>' or 'scripted'); default is self play.")(f)
     return f
 
 
@@ -77,6 +79,7 @@ def _spec_from_options(model, **options):
             region=options.get("region", "us-east-1"),
             run_id=options["run_id"],
             token_budget_per_day=options.get("token_budget_per_day"),
+            counterpart_model=options.get("counterpart_model"),
             price_table=options.get("price_table"),
             family_seed_start=options["family_seed_start"],
         )
@@ -483,7 +486,11 @@ def module():
 @click.option('--region', default="us-east-1", show_default=True)
 @click.option('--token-budget-per-day', type=click.IntRange(min=1), default=None,
               help='Pace the model under a daily token cap (tokens per rolling 24 hours, per process).')
-def module_run(name, model, preset, counterpart_types, run_id, out_dir, region, token_budget_per_day):
+@click.option('--counterpart-model', default=None,
+              help="Fixed counterpart model ('bedrock:<id>' or 'scripted'). The main presets require one; "
+                   "the pilot defaults to self play.")
+def module_run(name, model, preset, counterpart_types, run_id, out_dir, region, token_budget_per_day,
+               counterpart_model):
     """Run one preset of a module, once per counterpart policy."""
     import dataclasses
     import time as _time
@@ -497,7 +504,11 @@ def module_run(name, model, preset, counterpart_types, run_id, out_dir, region, 
     prefix = run_id or _time.strftime("%Y%m%d-%H%M%S")
     failures: list[tuple[str, str]] = []
     for policy in counterpart_types:
-        spec = package.PRESETS[preset](model, counterpart_type=policy, run_id=f"{prefix}-{preset}-{policy}")
+        try:
+            spec = package.PRESETS[preset](model, counterpart_type=policy, run_id=f"{prefix}-{preset}-{policy}",
+                                           counterpart_model=counterpart_model)
+        except RunSpecError as error:
+            raise click.UsageError(str(error)) from error
         spec = dataclasses.replace(spec, region=region, token_budget_per_day=token_budget_per_day)
         try:
             result = run_text_track(spec, out_dir, module=benchmark)

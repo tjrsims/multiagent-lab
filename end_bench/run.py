@@ -72,10 +72,20 @@ class RunSpec:
     # Pace the model under a known daily token cap (Bedrock's hidden account
     # level limit); None sends as fast as the request quota allows.
     token_budget_per_day: int | None = None
+    # The counterpart's model. None is self play (the acting model plays both
+    # sides). A fixed counterpart makes the opponent the same stimulus for
+    # every evaluated model, which a leaderboard needs; runs with different
+    # counterpart regimes are never pooled.
+    counterpart_model: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model.strip():
             raise RunSpecError("model is required")
+        if self.counterpart_model is not None:
+            if not isinstance(self.counterpart_model, str) or not self.counterpart_model.strip():
+                raise RunSpecError("counterpart_model must be a non empty string when given")
+            if self.counterpart_model != "scripted" and not self.counterpart_model.startswith("bedrock:"):
+                raise RunSpecError("unsupported counterpart_model; use 'bedrock:<model_id>' or 'scripted'")
         if not self.scenarios:
             raise RunSpecError("at least one scenario is required")
         unknown = set(self.conditions) - SUPPORTED_CONDITIONS
@@ -99,20 +109,27 @@ class RunSpec:
     def provider(self) -> str:
         return self.model.split(":", 1)[0] if ":" in self.model else self.model
 
+    @property
+    def counterpart_regime(self) -> str:
+        """``self_play`` or ``fixed:<model>``; runs are pooled only within one regime."""
+        return "self_play" if self.counterpart_model is None else f"fixed:{self.counterpart_model}"
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def _build_model(spec: RunSpec, ledger: CostLedger):
-    if spec.model == "scripted":
+def _build_model(spec: RunSpec, ledger: CostLedger, model_spec: str | None = None):
+    """The acting model, or the model named by ``model_spec`` (the counterpart)."""
+    name = spec.model if model_spec is None else model_spec
+    if name == "scripted":
         from end_bench.models.scripted import ScriptedTextModel
 
         return ScriptedTextModel(max_tokens=spec.max_tokens, cost_ledger=ledger)
-    if spec.model.startswith("bedrock:"):
+    if name.startswith("bedrock:"):
         from end_bench.models.bedrock import BedrockTextModel
 
         return BedrockTextModel(
-            spec.model,
+            name,
             region=spec.region,
             max_tokens=spec.max_tokens,
             temperature=spec.temperature,
@@ -121,7 +138,7 @@ def _build_model(spec: RunSpec, ledger: CostLedger):
             honor_caller_sampling=False,  # the run spec, not Concordia's per call defaults, is sent
         )
     raise RunSpecError(
-        f"unsupported model {spec.model!r}; use 'bedrock:<model_id>' or 'scripted'"
+        f"unsupported model {name!r}; use 'bedrock:<model_id>' or 'scripted'"
     )
 
 
@@ -205,17 +222,23 @@ def run_text_track(
     price_table = load_price_table(spec.price_table) if spec.price_table else None
     ledger = CostLedger(path=target / "cost_ledger.jsonl", table=price_table)
     model = _build_model(spec, ledger)
+    counterpart = None
+    if spec.counterpart_model is not None:
+        counterpart = _build_model(spec, ledger, spec.counterpart_model)
     if preflight:
         # One tiny call before the study. The executor records a model failure
         # as a FAILED trial and keeps going, so without this a model the
         # account cannot use (missing use case form, sales gated id) would
         # burn the whole design and end with "zero rows" and no reason.
-        try:
-            model.sample_text("Reply with the single word: ready")
-        except Exception as error:  # noqa: BLE001 - surfaced as the run's reason
-            raise RunSpecError(
-                f"preflight call to {spec.model!r} failed, so the run was not started: {error}"
-            ) from error
+        for name, candidate in ((spec.model, model), (spec.counterpart_model, counterpart)):
+            if candidate is None:
+                continue
+            try:
+                candidate.sample_text("Reply with the single word: ready")
+            except Exception as error:  # noqa: BLE001 - surfaced as the run's reason
+                raise RunSpecError(
+                    f"preflight call to {name!r} failed, so the run was not started: {error}"
+                ) from error
 
     plan = resolve_execution_surface(
         experiment_track="text_only",
@@ -246,6 +269,10 @@ def run_text_track(
         "closing_attestation": closing_attestation,
         "closing_attestation_source": CLOSING_ATTESTATION_SOURCE if closing_attestation else None,
         "attestation_timing": attestation_timing if closing_attestation else None,
+        # Who the actor negotiated against. Self play means the acting model
+        # played both sides; a leaderboard pools runs within one regime only.
+        "counterpart_model": spec.counterpart_model or spec.model,
+        "counterpart_regime": spec.counterpart_regime,
         # What the adapter sends on every acting call. Concordia asks for its
         # own defaults per call; the adapter ignores them and sends these.
         "sampling": {
@@ -271,6 +298,7 @@ def run_text_track(
         captured_actor_ids=(),
         model=model,
         run_id=spec.run_id,
+        counterpart_model=counterpart,
     )
     results = runner.run_all_emergent_scenarios(
         scenarios=list(spec.scenarios),

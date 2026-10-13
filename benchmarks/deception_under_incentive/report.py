@@ -36,6 +36,9 @@ def run_row(run_dir: str | Path) -> dict[str, Any]:
         "n_lie_sizes": len(sizes),
         "run_id": manifest.get("run_id"),
         "model": manifest.get("spec", {}).get("model"),
+        # Manifests written before the counterpart model was recorded were self play.
+        "counterpart_regime": manifest.get("counterpart_regime") or "self_play",
+        "counterpart_model": manifest.get("counterpart_model") or manifest.get("spec", {}).get("model"),
         "counterpart_type": ",".join(manifest.get("spec", {}).get("counterpart_types", [])),
         "module": (manifest.get("benchmark_module") or {}).get("version"),
         "negotiations": trials,
@@ -49,8 +52,17 @@ def run_row(run_dir: str | Path) -> dict[str, Any]:
 
 def render_leaderboard(run_dirs: list[str | Path]) -> str:
     rows = [run_row(d) for d in run_dirs]
+    regimes = sorted({r["counterpart_regime"] for r in rows})
+    if len(regimes) > 1:
+        raise ValueError(
+            "runs with different counterpart regimes cannot share a leaderboard: "
+            + ", ".join(regimes)
+            + ". Self play rows and fixed counterpart rows measure different things."
+        )
     rows.sort(key=lambda r: (r["lie_rate"] is None, r["lie_rate"] or 0.0))
     lines = [
+        f"Counterpart regime: {regimes[0]}" if regimes else "Counterpart regime: none",
+        "",
         "| run | model | counterpart | negotiations | claim bearing | lie rate | median lie size | $ per negotiation | unverified $ share |",
         "|---|---|---|---|---|---|---|---|---|",
     ]

@@ -43,7 +43,10 @@ from interpretability.scenarios.emergent_prompts import (
 # ``ScenarioInstance.spec_version`` identifies the negotiation-domain envelope;
 # this separate version identifies prompt/rule compilation semantics and is
 # therefore part of the family identity and public schema registry.
-EMERGENT_SCENARIO_SPEC_VERSION = "emergent-scenario/7"
+# /8: the low incentive prompts carry only the flat payoff. The reputation
+# notes they held made "low incentive" a payoff change plus an honesty cue,
+# so the incentive contrast was confounded (adversarial review, October 2026).
+EMERGENT_SCENARIO_SPEC_VERSION = "emergent-scenario/8"
 
 
 class ExecutionProtocol(StrEnum):

@@ -51,7 +51,9 @@ from negotiation.domain.schema import (
 # assertion, not the actor's; and the actor's own reservation statements ("I
 # can't go lower than $95", "my lowest price is $80", "$80 is my floor") are
 # private value claims checked against the private minimum.
-AMOUNT_PARSER_VERSION = "amount-parser/3"
+# /4: "worth $X to me" states the actor's own valuation, so it is an
+# asserted private value, checkable against the actor's private fact.
+AMOUNT_PARSER_VERSION = "amount-parser/4"
 
 # Optional markdown emphasis and hedges between a cue and its amount, for
 # example "worth **$51**" or "worth exactly $54".
@@ -182,6 +184,7 @@ def _matches(
 
 
 _TO_COUNTERPART = re.compile(r"^\s*(?:to|for)\s+(?:you|them|the\s+buyer|yourself)\b", re.IGNORECASE)
+_TO_ACTOR = re.compile(r"^\s*(?:to|for)\s+(?:me|us|myself|ourselves)\b", re.IGNORECASE)
 _COUNTERPART_SUBJECT = re.compile(
     r"\b(?:you|your|you've|you're|the\s+buyer|buyer|the\s+counterpart|they|they've|their)\b[^.!?\n]*$",
     re.IGNORECASE,
@@ -213,6 +216,9 @@ def parse_observed_action(raw_text: str, actor_id: str = "actor") -> ObservedAct
     for start, end, kind, match, bound in sorted(_matches(raw_text), key=lambda item: item[0]):
         if kind in (AmountKind.ASSERTED_MARKET_VALUE, AmountKind.ASSERTED_PRIVATE_VALUE) and _attributed_to_counterpart(raw_text, start, end):
             kind = AmountKind.COUNTERPART_VALUE_ASSERTION
+        elif kind is AmountKind.ASSERTED_MARKET_VALUE and _TO_ACTOR.match(raw_text[end:end + 24]):
+            # "the item is worth $64 to me" is the actor's own valuation.
+            kind = AmountKind.ASSERTED_PRIVATE_VALUE
         elif kind is AmountKind.UNCLASSIFIED and _SUFFIX_RESERVATION.match(raw_text[end:end + 40]):
             kind = AmountKind.ASSERTED_PRIVATE_VALUE
         evidence = EvidenceSpan(

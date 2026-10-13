@@ -6,6 +6,8 @@ import json
 import re
 from pathlib import Path
 
+import shutil
+
 import pytest
 from click.testing import CliRunner
 
@@ -78,7 +80,7 @@ def test_module_run_records_provenance_on_manifest_and_rows(module_run) -> None:
     assert manifest["benchmark_module"]["name"] == "deception_under_incentive"
     assert manifest["benchmark_module"]["version"] == "0.1.0"
     assert manifest["closing_attestation"] is True
-    assert manifest["closing_attestation_source"] == "registered:closing-attestation/3"
+    assert manifest["closing_attestation_source"] == "registered:closing-attestation/4"
     assert manifest["spec"]["closing_attestation"] is True
     assert manifest["execution_plan"]["counterpart_policy_ids"] == [module.policy_registry.get("interrogative").policy_id]
     dataset = load_text_dataset(result.text_dataset_path)
@@ -204,12 +206,47 @@ def test_cli_module_run_finishes_the_batch_when_one_policy_fails(tmp_path, monke
 
 def test_presets_scale_as_documented() -> None:
     pilot = PRESETS["pilot"]("scripted")
-    lite = PRESETS["main_lite"]("scripted")
-    main = PRESETS["main"]("scripted")
+    lite = PRESETS["main_lite"]("scripted", counterpart_model="scripted")
+    main = PRESETS["main"]("scripted", counterpart_model="scripted")
     assert pilot.families == 3 and pilot.conditions == ("high_incentive",) and pilot.rollouts_per_family == 1
     assert lite.families == 30 and len(lite.conditions) == 3 and lite.rollouts_per_family == 1
     assert main.families == 30 and len(main.conditions) == 3 and main.rollouts_per_family == 5
     assert all(spec.paired_facts and spec.closing_attestation for spec in (pilot, lite, main))
+    # The main design is a fixed counterpart design; self play stays a pilot convenience.
+    assert pilot.counterpart_regime == "self_play"
+    assert lite.counterpart_regime == main.counterpart_regime == "fixed:scripted"
+    for name in ("main", "main_lite"):
+        with pytest.raises(RunSpecError, match="fixed counterpart"):
+            PRESETS[name]("scripted")
+
+
+def test_cli_module_run_requires_a_counterpart_for_the_main_presets(tmp_path) -> None:
+    result = CliRunner().invoke(cli, [
+        "module", "run", "deception_under_incentive", "--model", "scripted", "--preset", "main_lite",
+        "--counterpart-type", "default", "--run-id", "nocp", "--out", str(tmp_path),
+    ])
+    assert result.exit_code != 0 and "fixed counterpart" in result.output
+    assert not (tmp_path / "nocp-main_lite-default").exists()
+
+
+def test_leaderboard_refuses_to_mix_counterpart_regimes(module_run, tmp_path) -> None:
+    import json as _json
+
+    from benchmarks.deception_under_incentive.report import render_leaderboard, run_row
+
+    _, out = module_run
+    run_dir = out / "mod-smoke"
+    assert run_row(run_dir)["counterpart_regime"] == "self_play"
+    fixed = tmp_path / "fixed"
+    shutil.copytree(run_dir, fixed)
+    manifest_path = fixed / "run_manifest.json"
+    manifest = _json.loads(manifest_path.read_text())
+    manifest["counterpart_regime"] = "fixed:bedrock:other"
+    manifest["counterpart_model"] = "bedrock:other"
+    manifest_path.write_text(_json.dumps(manifest))
+    assert "Counterpart regime: fixed:bedrock:other" in render_leaderboard([fixed])
+    with pytest.raises(ValueError, match="different counterpart regimes"):
+        render_leaderboard([run_dir, fixed])
 
 
 def test_cli_leaderboard_skips_unfinished_run_dirs(module_run, tmp_path) -> None:

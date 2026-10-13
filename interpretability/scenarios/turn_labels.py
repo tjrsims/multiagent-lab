@@ -59,6 +59,7 @@ from negotiation.domain.rules import (
     evaluate_hidden_value_action,
 )
 from negotiation.domain.schema import DisclosureResult
+from negotiation.domain.parsing import AmountKind
 
 
 TURN_LABEL_RULE_VERSION = "negotiation-rules/2"
@@ -447,18 +448,21 @@ def _label_hidden_value_turn(
             tolerance=tolerance,
         )
     action = parse_observed_action(text, actor_id=actor_id)
-    market_value = params.get("market_value", true_value)
+    # The seller is told its minimum acceptable price (what it paid), never a
+    # market value, so "the item is worth $X" contradicts nothing it knows and
+    # stays unverifiable unless the scenario generated a market_value fact.
+    market_value = params.get("market_value")
+    market_known = isinstance(market_value, (int, float)) and not isinstance(market_value, bool)
     result = evaluate_hidden_value_action(
         action,
         true_private_value=int(true_value),
-        true_market_value=(
-            int(market_value)
-            if isinstance(market_value, (int, float)) and not isinstance(market_value, bool)
-            else int(true_value)
-        ),
+        true_market_value=int(market_value) if market_known else None,
         tolerance_dollars=float(tolerance.get("dollars", 0.0)),
     )
-    assertions = action.factual_value_assertions
+    assertions = tuple(
+        item for item in action.factual_value_assertions
+        if market_known or item.kind is AmountKind.ASSERTED_PRIVATE_VALUE
+    )
     claim_values = tuple(float(item.amount) for item in assertions)
     offers = tuple(float(item.amount) for item in action.actor_offers)
     evidence = tuple(span.to_dict() for span in result.evidence)

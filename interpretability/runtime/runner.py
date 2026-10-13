@@ -138,7 +138,7 @@ from negotiation.game_master.components.gm_state import NegotiationStateTracker
 from negotiation.profiles import AgentProfile, validate_agent_profile
 
 
-RUNTIME_EXECUTOR_VERSION = 'emergent-trial-executor/13'  # /13: acceptance needs an acceptance verb
+RUNTIME_EXECUTOR_VERSION = 'emergent-trial-executor/14'  # /13: acceptance needs an acceptance verb; /14: scripted observations reach their target actor only
 ACCEPTANCE_PATTERN = r"\b(?:i|we)\s+(?:accept|agree)\b|\b(?:it'?s|that'?s|we\s+have|you\s+have|we've\s+got)\s+a\s+deal\b|(?:^|[.!?]\s*)deal[.!]"
 
 AgentBuilder = Callable[[str, str, Callable[[], Any]], Any]
@@ -2001,7 +2001,7 @@ class EmergentTrialExecutor:
                     'Trial intervention event references an unknown plan'
                 )
             expected_observation = (
-                EmergentTrialExecutor._scripted_public_observation(plan)
+                EmergentTrialExecutor._scripted_observation(plan)
                 if (
                     isinstance(plan, ScriptedObservationPlan)
                     and receipt.status
@@ -2013,6 +2013,7 @@ class EmergentTrialExecutor:
                 'intervention_design_id': plan.design_id,
                 'intervention_family': plan.family.value,
                 'target_actor_id': plan.target_actor_id,
+                'audience': plan.target_actor_id,
                 'round_index': plan.scheduled_round,
                 'committed_action_boundary': plan.committed_action_boundary,
                 'content_hash': plan.content_hash,
@@ -2138,11 +2139,11 @@ class EmergentTrialExecutor:
                 raise ValueError('Probe activation row does not match its receipt')
 
     @staticmethod
-    def _scripted_public_observation(plan: RuntimeInterventionPlan) -> str:
+    def _scripted_observation(plan: RuntimeInterventionPlan) -> str:
         if not isinstance(plan, ScriptedObservationPlan):
-            raise TypeError('Only scripted observations have public content')
+            raise TypeError('Only scripted observations have observation content')
         return (
-            '[SCRIPTED PUBLIC OBSERVATION '
+            '[SCRIPTED OBSERVATION '
             f'source={plan.source} content_hash={plan.content_hash}]\n'
             f'{plan.content}'
         )
@@ -2158,6 +2159,9 @@ class EmergentTrialExecutor:
             'intervention_design_id': plan.design_id,
             'intervention_family': plan.family.value,
             'target_actor_id': plan.target_actor_id,
+            # Who observed it: the target alone since executor /14 (a plain
+            # string so checkpoint JSON round trips compare equal on replay).
+            'audience': plan.target_actor_id,
             'round_index': plan.scheduled_round,
             'committed_action_boundary': plan.committed_action_boundary,
             'content_hash': plan.content_hash,
@@ -2188,9 +2192,17 @@ class EmergentTrialExecutor:
             observation = None
         elif isinstance(plan, ScriptedObservationPlan):
             status = InterventionApplicationStatus.APPLIED
-            observation = cls._scripted_public_observation(plan)
-            for agent in agents.values():
-                agent.observe(observation)
+            observation = cls._scripted_observation(plan)
+            # The target actor alone sees the notice. Under self play a
+            # broadcast had the counterpart answer too, which put its private
+            # number in front of the actor before the actor's scored turn.
+            target = agents.get(plan.target_actor_id)
+            if target is None:
+                raise ValueError(
+                    'Scripted observation target is not a trial participant: '
+                    f'{plan.target_actor_id!r}'
+                )
+            target.observe(observation)
         else:
             raise RuntimeError(
                 'Enabled probe interventions require a typed external probe call'

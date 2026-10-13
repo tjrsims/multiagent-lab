@@ -1670,12 +1670,18 @@ class InterpretabilityRunner:
         captured_actor_ids: Optional[Sequence[str]] = None,
         model: Optional[Any] = None,
         run_id: Optional[str] = None,
+        counterpart_model: Optional[Any] = None,
     ):
         """``model`` injects a ready acting model (e.g. an API adapter).
 
         Injection is accepted only on the ``text_only`` track: an injected
         model cannot prove it captured activations from the acting call, so
         white-box tracks always construct one of the capturing wrappers.
+
+        ``counterpart_model`` gives the counterpart a different injected model
+        (a fixed opponent shared by every evaluated model). It requires an
+        injected ``model``; without it the counterpart runs on the acting
+        model (self play).
         """
         self.experiment_track = ExperimentTrack(experiment_track)
         if captured_actor_ids is None:
@@ -1719,6 +1725,15 @@ class InterpretabilityRunner:
                 if not callable(getattr(model, method, None)):
                     raise TypeError(f'injected model must implement {method}()')
             self.model = model
+            if counterpart_model is not None:
+                for method in ('sample_text', 'sample_choice'):
+                    if not callable(getattr(counterpart_model, method, None)):
+                        raise TypeError(f'injected counterpart model must implement {method}()')
+        elif counterpart_model is not None:
+            raise ValueError(
+                'a distinct counterpart model requires an injected acting model '
+                'on the text_only track'
+            )
         elif self.experiment_track is ExperimentTrack.TEXT_ONLY:
             self.model = HuggingFaceTextModel(
                 model_name=model_name,
@@ -1779,8 +1794,12 @@ class InterpretabilityRunner:
         self._component_access_failures: Dict[str, int] = defaultdict(int)
 
         # Create fast model wrapper for non-essential calls (counterpart, etc.)
-        # This provides ~5x speedup by skipping activation capture
-        self.fast_model = FastModelWrapper(self.model)
+        # This provides ~5x speedup by skipping activation capture. A distinct
+        # injected counterpart model makes the opponent a fixed stimulus.
+        self.counterpart_model = counterpart_model
+        self.fast_model = FastModelWrapper(
+            counterpart_model if counterpart_model is not None else self.model
+        )
 
         # Setup evaluator model for ground truth extraction (AFTER main model is created)
         self.evaluator_model = None

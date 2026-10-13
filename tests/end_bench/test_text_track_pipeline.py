@@ -314,19 +314,19 @@ def test_both_attestations_reach_the_actor_and_receipts_follow_rows(tmp_path) ->
     rows = sorted((r for r in dataset["metadata"] if r["sample_type"] == "negotiation"), key=lambda r: r["round_num"])
     assert rows and rows[-1]["round_num"] == 4
     last_prompt = records[rows[-1]["generation_record_id"]]["assembled_prompt"]
-    marks = [m.start() for m in __import__("re").finditer(r"SCRIPTED PUBLIC OBSERVATION", last_prompt)]
+    marks = [m.start() for m in __import__("re").finditer(r"SCRIPTED OBSERVATION", last_prompt)]
     assert len(marks) == 2, "both notices must be in the actor's last prompt"
     hashes = set(__import__("re").findall(r"content_hash=(sha256:[0-9a-f]+)", last_prompt))
     assert len(hashes) == 2, "the two notices must differ, or the agent's memory drops one"
     assert "Early notice." in last_prompt and "Closing notice." in last_prompt
     first_prompt = records[rows[0]["generation_record_id"]]["assembled_prompt"]
-    assert "SCRIPTED PUBLIC OBSERVATION" not in first_prompt
+    assert "SCRIPTED OBSERVATION" not in first_prompt
     assert len(rows[0]["intervention_application_receipt_ids"]) == 2, "trial level provenance names both receipts"
     assert rows[0]["interventions_delivered_before_turn"] == [], "round 0 happened before any notice"
     assert len(rows[1]["interventions_delivered_before_turn"]) == 1
     assert len(rows[-1]["interventions_delivered_before_turn"]) == 2
     manifest = json.loads(result.manifest_path.read_text())
-    assert manifest["closing_attestation_source"] == "registered:closing-attestation/3"
+    assert manifest["closing_attestation_source"] == "registered:closing-attestation/4"
 
 
 def test_run_settings_override_concordia_sampling_defaults(tmp_path, monkeypatch) -> None:
@@ -362,3 +362,67 @@ def test_run_settings_override_concordia_sampling_defaults(tmp_path, monkeypatch
         assert record["requested_sampling"]["max_tokens"] == 2200, "Concordia's request is recorded, not applied"
     manifest = json.loads(result.manifest_path.read_text())
     assert manifest["sampling"]["temperature"] == 0.7 and manifest["sampling"]["max_tokens"] == 160
+
+
+def test_counterpart_model_is_validated_and_recorded(tmp_path, monkeypatch) -> None:
+    """A fixed counterpart is a second injected model; the manifest names the regime."""
+    import end_bench.run as run_module
+    from end_bench.run import RunSpecError
+
+    with pytest.raises(RunSpecError, match="counterpart_model"):
+        RunSpec(model="scripted", counterpart_model="openai:gpt")
+    with pytest.raises(RunSpecError, match="counterpart_model"):
+        RunSpec(model="scripted", counterpart_model="  ")
+    assert RunSpec(model="scripted").counterpart_regime == "self_play"
+    assert RunSpec(model="scripted", counterpart_model="bedrock:x").counterpart_regime == "fixed:bedrock:x"
+
+    built = []
+    real_build = run_module._build_model
+
+    def recording_build(spec, ledger, model_spec=None):
+        model = real_build(spec, ledger, model_spec)
+        built.append((model_spec, model))
+        return model
+
+    monkeypatch.setattr(run_module, "_build_model", recording_build)
+    spec = RunSpec(model="scripted", counterpart_model="scripted", scenarios=("ultimatum_bluff",),
+                   conditions=("high_incentive",), families=1, max_rounds=2, rollouts_per_family=1,
+                   paired_facts=False, run_id="fixed-cp")
+    result = run_text_track(spec, tmp_path, preflight=False)
+    assert [m for m, _ in built] == [None, "scripted"]
+    assert built[0][1] is not built[1][1], "the counterpart is its own model object"
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["counterpart_model"] == "scripted" and manifest["counterpart_regime"] == "fixed:scripted"
+    assert manifest["spec"]["counterpart_model"] == "scripted"
+    self_play = json.loads(run_text_track(
+        RunSpec(model="scripted", scenarios=("ultimatum_bluff",), conditions=("high_incentive",), families=1,
+                max_rounds=2, rollouts_per_family=1, paired_facts=False, run_id="self-play"),
+        tmp_path, preflight=False).manifest_path.read_text())
+    assert self_play["counterpart_model"] == "scripted" and self_play["counterpart_regime"] == "self_play"
+
+
+def test_runner_binds_the_counterpart_model_only_beside_an_injected_actor() -> None:
+    from end_bench.models.scripted import ScriptedTextModel
+    from interpretability.evaluation import InterpretabilityRunner
+
+    actor, opponent = ScriptedTextModel(), ScriptedTextModel()
+    runner = InterpretabilityRunner(model_name="scripted", device="cpu", evaluator_api=None, evaluator_type="rule",
+                                    experiment_track="text_only", captured_actor_ids=(), model=actor,
+                                    counterpart_model=opponent)
+    assert runner.model is actor and runner.fast_model._base is opponent
+    plain = InterpretabilityRunner(model_name="scripted", device="cpu", evaluator_api=None, evaluator_type="rule",
+                                   experiment_track="text_only", captured_actor_ids=(), model=actor)
+    assert plain.fast_model._base is actor
+    with pytest.raises(TypeError, match="counterpart model"):
+        InterpretabilityRunner(model_name="scripted", device="cpu", evaluator_api=None, evaluator_type="rule",
+                               experiment_track="text_only", captured_actor_ids=(), model=actor,
+                               counterpart_model=object())
+
+
+def test_cli_run_text_accepts_a_counterpart_model() -> None:
+    from click.testing import CliRunner
+
+    from end_bench.cli import cli
+
+    result = CliRunner().invoke(cli, ["smoke", "--help"])
+    assert result.exit_code == 0 and "--counterpart-model" in result.output
