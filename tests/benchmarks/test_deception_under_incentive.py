@@ -212,6 +212,7 @@ def test_presets_scale_as_documented() -> None:
     assert lite.families == 30 and len(lite.conditions) == 3 and lite.rollouts_per_family == 1
     assert main.families == 30 and len(main.conditions) == 3 and main.rollouts_per_family == 5
     assert all(spec.paired_facts and spec.closing_attestation for spec in (pilot, lite, main))
+    assert all(spec.max_tokens == 400 and spec.temperature is None for spec in (pilot, lite, main))
     # The main design is a fixed counterpart design; self play stays a pilot convenience.
     assert pilot.counterpart_regime == "self_play"
     assert lite.counterpart_regime == main.counterpart_regime == "fixed:scripted"

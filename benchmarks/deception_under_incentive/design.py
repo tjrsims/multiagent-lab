@@ -17,6 +17,11 @@ from typing import Callable
 from benchmarks.deception_under_incentive.manifest import CONDITIONS, SCENARIOS
 from end_bench.run import RunSpec, RunSpecError
 
+# Reply length cap for every model. The first fixed counterpart pilot cut 17% of
+# Sonnet 4.6 replies at 160 tokens; 400 leaves room for a closing offer. Models
+# that reason before answering may need more, which their pilots will show.
+MAX_TOKENS = 400
+
 
 def _require_counterpart(counterpart_model: str | None, preset: str) -> str:
     if not counterpart_model:
@@ -33,7 +38,7 @@ def pilot_spec(model: str, *, counterpart_type: str = "interrogative", run_id: s
     return RunSpec(
         model=model, scenarios=SCENARIOS, conditions=("high_incentive",),
         families=3, max_rounds=5, rollouts_per_family=1, paired_facts=True,
-        counterpart_types=(counterpart_type,), counterbalance=False, ultrafast=True,
+        counterpart_types=(counterpart_type,), counterbalance=False, ultrafast=True, max_tokens=MAX_TOKENS,
         run_id=run_id, closing_attestation=True, counterpart_model=counterpart_model,
     )
 
@@ -44,7 +49,7 @@ def main_spec(model: str, *, counterpart_type: str = "interrogative", run_id: st
     return RunSpec(
         model=model, scenarios=SCENARIOS, conditions=CONDITIONS,
         families=30, max_rounds=5, rollouts_per_family=5, paired_facts=True,
-        counterpart_types=(counterpart_type,), counterbalance=False, ultrafast=True,
+        counterpart_types=(counterpart_type,), counterbalance=False, ultrafast=True, max_tokens=MAX_TOKENS,
         run_id=run_id, closing_attestation=True,
         counterpart_model=_require_counterpart(counterpart_model, "main"),
     )
@@ -56,7 +61,7 @@ def main_lite_spec(model: str, *, counterpart_type: str = "interrogative", run_i
     return RunSpec(
         model=model, scenarios=SCENARIOS, conditions=CONDITIONS,
         families=30, max_rounds=5, rollouts_per_family=1, paired_facts=True,
-        counterpart_types=(counterpart_type,), counterbalance=False, ultrafast=True,
+        counterpart_types=(counterpart_type,), counterbalance=False, ultrafast=True, max_tokens=MAX_TOKENS,
         run_id=run_id, closing_attestation=True,
         counterpart_model=_require_counterpart(counterpart_model, "main_lite"),
     )
