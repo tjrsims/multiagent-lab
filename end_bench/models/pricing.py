@@ -71,6 +71,21 @@ PRICE_SOURCES: Mapping[str, str] = {
     "mistral:mistral-large-latest": "unverified: third party summaries read 2026-10-13; equals the Bedrock Price List for Mistral Large 3",
     "mistral:mistral-medium-latest": "unverified: third party summaries read 2026-10-13",
     "mistral:mistral-small-latest": "unverified: third party summaries read 2026-10-13",
+    # Paper set additions, 2026-10-13.
+    "anthropic.claude-fable-5-1": "unverified: Anthropic list price (platform.claude.com read 2026-10-13); the Bedrock us. profile is reported 10% higher",
+    "anthropic.claude-opus-5-5": "unverified: Anthropic list price (platform.claude.com read 2026-10-13)",
+    "anthropic.claude-sonnet-5-5": "unverified: Anthropic list price (platform.claude.com read 2026-10-13)",
+    "anthropic.claude-haiku-5-5": "unverified: Anthropic list price 'from' rate (platform.claude.com read 2026-10-13)",
+    "openai:gpt-6-astra": "unverified: OpenAI docs listing and third party summaries read 2026-10-13",
+    "openai:gpt-6.1-sol": "unverified: third party summaries of the 2026 price cut read 2026-10-13",
+    "openai:gpt-6-sol": "unverified: third party summaries of the 2026 price cut read 2026-10-13",
+    "openai:gpt-6-luna": "unverified: third party summaries of the 2026 price cut read 2026-10-13",
+    "gemini:gemini-3.8-flash": "verified: ai.google.dev pricing page read 2026-10-13 (rate through 2026-12-31; doubles on 2027-01-01)",
+    "gemini:gemini-3.6-flash": "verified: ai.google.dev pricing page read 2026-10-13 (rate through 2026-12-31; doubles on 2027-01-01)",
+    "zai:glm-5.3": "unverified: third party summaries read 2026-10-13",
+    "meta:muse-wonder-1.0": "unverified: Meta newsroom post as summarized by third parties, read 2026-10-13",
+    "meta:muse-spark-1.3": "unverified: OpenRouter and third party listings read 2026-10-13",
+    "openrouter:meta/muse-spark-1.3": "unverified: OpenRouter listing read 2026-10-13",
 }
 
 DEFAULT_PRICES_PER_MTOK: Mapping[str, tuple[float, float]] = {
@@ -109,6 +124,21 @@ DEFAULT_PRICES_PER_MTOK: Mapping[str, tuple[float, float]] = {
     "mistral:mistral-large-latest": (0.50, 1.50),
     "mistral:mistral-medium-latest": (1.50, 7.50),
     "mistral:mistral-small-latest": (0.15, 0.60),
+    # Paper set additions, 2026-10-13 (USD per 1M tokens, input, output).
+    "anthropic.claude-fable-5-1": (10.00, 50.00),
+    "anthropic.claude-opus-5-5": (4.00, 20.00),
+    "anthropic.claude-sonnet-5-5": (2.00, 10.00),
+    "anthropic.claude-haiku-5-5": (0.10, 0.50),
+    "openai:gpt-6-astra": (10.00, 50.00),
+    "openai:gpt-6.1-sol": (2.00, 10.00),
+    "openai:gpt-6-sol": (2.00, 10.00),
+    "openai:gpt-6-luna": (0.10, 0.50),
+    "gemini:gemini-3.8-flash": (0.75, 3.75),
+    "gemini:gemini-3.6-flash": (0.75, 3.75),
+    "zai:glm-5.3": (1.40, 4.40),
+    "meta:muse-wonder-1.0": (4.00, 20.00),
+    "meta:muse-spark-1.3": (1.25, 4.25),
+    "openrouter:meta/muse-spark-1.3": (1.25, 4.25),
 }
 
 

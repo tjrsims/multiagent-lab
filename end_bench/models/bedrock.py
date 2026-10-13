@@ -121,9 +121,10 @@ class BedrockTextModel(language_model.LanguageModel):
         *,
         region: str = "us-east-1",
         max_tokens: int = 128,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         top_p: float | None = 0.9,
         system_prompt: str | None = None,
+        additional_request_fields: Mapping[str, Any] | None = None,
         client: Any | None = None,
         cost_ledger: CostLedger | None = None,
         max_retries: int = 8,
@@ -142,8 +143,8 @@ class BedrockTextModel(language_model.LanguageModel):
             raise ValueError("model_id must be a non-empty string")
         if type(max_tokens) is not int or max_tokens <= 0:
             raise ValueError("max_tokens must be a positive integer")
-        if not 0.0 <= float(temperature) <= 1.0:
-            raise ValueError("Bedrock temperature must be within [0, 1]")
+        if temperature is not None and not 0.0 <= float(temperature) <= 1.0:
+            raise ValueError("Bedrock temperature must be within [0, 1] (None sends the provider default)")
         if top_p is not None and not 0.0 < float(top_p) <= 1.0:
             raise ValueError("top_p must be within (0, 1]")
         if type(max_retries) is not int or max_retries < 0:
@@ -155,7 +156,15 @@ class BedrockTextModel(language_model.LanguageModel):
         self.model_id = model_id.removeprefix("bedrock:")
         self.region = region
         self.default_max_tokens = max_tokens
-        self.default_temperature = float(temperature)
+        # None means provider default sampling: no temperature and no topP are
+        # sent. OpenAI models on Converse and Claude Fable 5.1 reject any
+        # temperature, and Gemini 3 and DeepSeek V4 advise their defaults, so a
+        # run that must compare models uses provider defaults everywhere.
+        self.default_temperature = None if temperature is None else float(temperature)
+        # Model specific request fields (Converse additionalModelRequestFields),
+        # for example a thinking effort level; recorded in provenance.
+        self.additional_request_fields = dict(additional_request_fields or {})
+        self.refusals = 0
         # Anthropic models on Bedrock reject a request that sets both
         # temperature and top_p ("cannot both be specified for this model"),
         # so they never get topP. The requested value is still recorded in
@@ -227,11 +236,10 @@ class BedrockTextModel(language_model.LanguageModel):
             self._client = _default_client(self.region, read_timeout=self._read_timeout)
         return self._client
 
-    def _converse(self, prompt: str, *, max_tokens: int, temperature: float, top_p: float | None) -> tuple[dict[str, Any], int]:
-        inference: dict[str, Any] = {
-            "maxTokens": int(max_tokens),
-            "temperature": float(temperature),
-        }
+    def _converse(self, prompt: str, *, max_tokens: int, temperature: float | None, top_p: float | None) -> tuple[dict[str, Any], int]:
+        inference: dict[str, Any] = {"maxTokens": int(max_tokens)}
+        if temperature is not None:
+            inference["temperature"] = float(temperature)
         if top_p is not None:
             inference["topP"] = float(top_p)
         request: dict[str, Any] = {
@@ -241,6 +249,8 @@ class BedrockTextModel(language_model.LanguageModel):
         }
         if self.system_prompt:
             request["system"] = [{"text": self.system_prompt}]
+        if self.additional_request_fields:
+            request["additionalModelRequestFields"] = dict(self.additional_request_fields)
         attempt = 0
         waited_for_cap = 0.0
         while True:
@@ -325,15 +335,23 @@ class BedrockTextModel(language_model.LanguageModel):
         effective_max_tokens = (
             int(max_tokens) if (use_caller and max_tokens is not None) else self.default_max_tokens
         )
-        effective_temperature = (
-            float(temperature) if (use_caller and temperature is not None) else self.default_temperature
-        )
-        effective_temperature = min(max(effective_temperature, 0.0), 1.0)
+        if use_caller and temperature is not None:
+            effective_temperature: float | None = min(max(float(temperature), 0.0), 1.0)
+            sampling_policy = "caller"
+        elif self.default_temperature is None:
+            effective_temperature = None  # provider default: nothing sent
+            sampling_policy = "provider_default"
+        else:
+            effective_temperature = min(max(self.default_temperature, 0.0), 1.0)
+            sampling_policy = "configured"
         requested_top_p = float(top_p) if top_p is not None else (self.default_top_p if self.default_top_p is not None else 1.0)
-        effective_top_p = (
-            None if self.anthropic  # None omits topP
-            else (float(top_p) if (use_caller and top_p is not None) else self.default_top_p)
-        )
+        if effective_temperature is None:
+            effective_top_p = None  # provider default sampling sends no topP either
+        else:
+            effective_top_p = (
+                None if self.anthropic  # None omits topP
+                else (float(top_p) if (use_caller and top_p is not None) else self.default_top_p)
+            )
         self._respect_token_budget()
         cap_waits_before = self.daily_cap_waits
         started = time.monotonic()
@@ -356,6 +374,11 @@ class BedrockTextModel(language_model.LanguageModel):
         output_tokens = int(usage.get("outputTokens", 0) or 0)
         stop_reason = response.get("stopReason") if isinstance(response, Mapping) else None
         self._last_usage = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+        # Claude Fable 5.1 returns classifier refusals as HTTP 200 with
+        # stopReason "refusal"; counted so a run can report them.
+        refused = str(stop_reason).lower() == "refusal"
+        if refused:
+            self.refusals += 1
 
         # Provenance: requested values are what the caller asked for; the
         # effective record states what Bedrock was sent. Seeds and top_k are
@@ -366,10 +389,17 @@ class BedrockTextModel(language_model.LanguageModel):
         )
         from interpretability.runtime.model_call import CaptureMode
 
+        # The requested record keeps the caller's value; with nothing requested
+        # and nothing sent it holds 1.0, the provider default every model here
+        # documents, and sampling_policy says that nothing was sent.
+        requested_temperature = (
+            float(temperature) if temperature is not None
+            else (effective_temperature if effective_temperature is not None else 1.0)
+        )
         provenance = _sampling_provenance(
             requested_max_tokens=requested_max_tokens,
             effective_max_tokens=effective_max_tokens,
-            temperature=effective_temperature if temperature is None else float(temperature),
+            temperature=requested_temperature,
             # When topP is not sent (Anthropic), Bedrock's default of no
             # nucleus truncation applies: requested 1.0, effective recorded as
             # None (not sent).
@@ -379,13 +409,16 @@ class BedrockTextModel(language_model.LanguageModel):
             effective_temperature=effective_temperature,
             effective_top_p=effective_top_p,
             effective_top_k=None,
-            effective_do_sample=effective_temperature > 0.0,
+            effective_do_sample=True if effective_temperature is None else effective_temperature > 0.0,
             generation_path=GENERATION_PATH,
             fallback_used=False,
             fallback_reason=None,
         )
         provenance["effective"]["seed"] = None
         provenance["provider"] = "bedrock"
+        provenance["sampling_policy"] = sampling_policy
+        provenance["additional_request_fields"] = dict(self.additional_request_fields)
+        provenance["refusal"] = refused
         provenance["model_id"] = self.model_id
         provenance["usage"] = dict(self._last_usage)
         provenance["stop_reason"] = stop_reason

@@ -104,7 +104,7 @@ class OpenAICompatTextModel(language_model.LanguageModel):
         api_key_env: str | None = None,
         base_url_env: str | None = None,
         max_tokens: int = 128,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         top_p: float | None = None,
         system_prompt: str | None = None,
         transport: Transport | None = None,
@@ -125,8 +125,8 @@ class OpenAICompatTextModel(language_model.LanguageModel):
             raise ValueError("model_id must be a non-empty string")
         if type(max_tokens) is not int or max_tokens <= 0:
             raise ValueError("max_tokens must be a positive integer")
-        if not 0.0 <= float(temperature) <= 2.0:
-            raise ValueError("temperature must be within [0, 2]")
+        if temperature is not None and not 0.0 <= float(temperature) <= 2.0:
+            raise ValueError("temperature must be within [0, 2] (None sends the provider default)")
         if top_p is not None and not 0.0 < float(top_p) <= 1.0:
             raise ValueError("top_p must be within (0, 1]")
         if type(max_retries) is not int or max_retries < 0:
@@ -151,8 +151,12 @@ class OpenAICompatTextModel(language_model.LanguageModel):
         self._api_key = api_key
         self._api_key_env = api_key_env
         self.default_max_tokens = max_tokens
-        self.default_temperature = float(temperature)
+        # None: provider default sampling, no temperature or top_p in the body.
+        # OpenAI reasoning models reject any temperature; Gemini 3 and DeepSeek
+        # V4 advise their defaults.
+        self.default_temperature = None if temperature is None else float(temperature)
         self.default_top_p = None if top_p is None else float(top_p)
+        self.refusals = 0
         self.system_prompt = system_prompt
         self.max_tokens_field = max_tokens_field
         self.extra_body = dict(extra_body or {})
@@ -215,7 +219,7 @@ class OpenAICompatTextModel(language_model.LanguageModel):
             )
         return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
-    def _body(self, prompt: str, *, max_tokens: int, temperature: float, top_p: float | None) -> dict[str, Any]:
+    def _body(self, prompt: str, *, max_tokens: int, temperature: float | None, top_p: float | None) -> dict[str, Any]:
         messages: list[dict[str, str]] = []
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
@@ -224,14 +228,15 @@ class OpenAICompatTextModel(language_model.LanguageModel):
             "model": self.model_id,
             "messages": messages,
             self.max_tokens_field: int(max_tokens),
-            "temperature": float(temperature),
         }
+        if temperature is not None:
+            body["temperature"] = float(temperature)
         if top_p is not None:
             body["top_p"] = float(top_p)
         body.update(self.extra_body)
         return body
 
-    def _post(self, prompt: str, *, max_tokens: int, temperature: float, top_p: float | None) -> tuple[dict[str, Any], int]:
+    def _post(self, prompt: str, *, max_tokens: int, temperature: float | None, top_p: float | None) -> tuple[dict[str, Any], int]:
         url = f"{self.base_url}/chat/completions"
         headers = self._headers()
         attempt = 0
@@ -321,10 +326,19 @@ class OpenAICompatTextModel(language_model.LanguageModel):
         self._call_count += 1
         use_caller = self.honor_caller_sampling
         effective_max_tokens = int(max_tokens) if (use_caller and max_tokens is not None) else self.default_max_tokens
-        effective_temperature = float(temperature) if (use_caller and temperature is not None) else self.default_temperature
-        effective_temperature = min(max(effective_temperature, 0.0), 2.0)
+        if use_caller and temperature is not None:
+            effective_temperature: float | None = min(max(float(temperature), 0.0), 2.0)
+            sampling_policy = "caller"
+        elif self.default_temperature is None:
+            effective_temperature = None
+            sampling_policy = "provider_default"
+        else:
+            effective_temperature = min(max(self.default_temperature, 0.0), 2.0)
+            sampling_policy = "configured"
         requested_top_p = float(top_p) if top_p is not None else (self.default_top_p if self.default_top_p is not None else 1.0)
-        effective_top_p = float(top_p) if (use_caller and top_p is not None) else self.default_top_p
+        effective_top_p = None if effective_temperature is None else (
+            float(top_p) if (use_caller and top_p is not None) else self.default_top_p
+        )
         self._respect_token_budget()
         started = time.monotonic()
         response, retries = self._post(
@@ -332,6 +346,9 @@ class OpenAICompatTextModel(language_model.LanguageModel):
         )
         latency_ms = (time.monotonic() - started) * 1000.0
         text, stop_reason = self._extract(response)
+        refused = str(stop_reason).lower() in ("refusal", "content_filter")
+        if refused:
+            self.refusals += 1
         terminator_hit: str | None = None
         for terminator in terminators or ():
             if terminator and terminator in text:
@@ -349,23 +366,30 @@ class OpenAICompatTextModel(language_model.LanguageModel):
         )
         from interpretability.runtime.model_call import CaptureMode
 
+        requested_temperature = (
+            float(temperature) if temperature is not None
+            else (effective_temperature if effective_temperature is not None else 1.0)
+        )
         provenance = _sampling_provenance(
             requested_max_tokens=max_tokens,
             effective_max_tokens=effective_max_tokens,
-            temperature=effective_temperature if temperature is None else float(temperature),
+            temperature=requested_temperature,
             top_p=requested_top_p,
             top_k=int(top_k) if top_k is not None else 0,
             seed=seed,
             effective_temperature=effective_temperature,
             effective_top_p=effective_top_p,
             effective_top_k=None,
-            effective_do_sample=effective_temperature > 0.0,
+            effective_do_sample=True if effective_temperature is None else effective_temperature > 0.0,
             generation_path=GENERATION_PATH,
             fallback_used=False,
             fallback_reason=None,
         )
         provenance["effective"]["seed"] = None  # not sent; servers differ on seed support
         provenance["provider"] = "openai_compat"
+        provenance["sampling_policy"] = sampling_policy
+        provenance["extra_body"] = dict(self.extra_body)
+        provenance["refusal"] = refused
         provenance["scheme"] = self.scheme
         provenance["endpoint_host"] = self.endpoint_host
         provenance["model_id"] = self.model_id

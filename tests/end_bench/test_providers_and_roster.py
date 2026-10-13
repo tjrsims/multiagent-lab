@@ -29,19 +29,22 @@ from end_bench.models.roster import (
     MODEL_ROSTER,
     MODEL_ROSTER_VERSION,
     PEER_BENCHMARKS,
+    SAMPLING_MODES,
     TIERS,
     RosterEntry,
     Route,
     format_roster,
+    paper_roster,
     resolve_model_spec,
     roster_json,
+    sampling_constraint,
     standard_roster,
 )
 from end_bench.models.scripted import ScriptedTextModel
 
 
 def test_registry_rows_are_well_formed_and_parse() -> None:
-    assert {"bedrock", "scripted", "openai", "xai", "gemini", "deepseek", "mistral", "moonshot", "qwen", "zai"} <= set(known_schemes())
+    assert {"bedrock", "scripted", "openai", "xai", "gemini", "deepseek", "mistral", "moonshot", "qwen", "zai", "meta"} <= set(known_schemes())
     for provider in PROVIDERS.values():
         if provider.kind == "openai_compat":
             assert provider.base_url.startswith("https://") and provider.key_env.endswith("_API_KEY")
@@ -124,16 +127,34 @@ def test_roster_entries_are_consistent() -> None:
                 assert route.note, f"{key}: an unverified route must say how to confirm it"
         assert set(entry.peer_benchmarks) <= set(PEER_BENCHMARKS)
     standard = standard_roster()
-    assert 15 <= len(standard) <= 20
+    assert 15 <= len(standard) <= 24
     vendors = {entry.vendor for entry in standard}
-    assert {"OpenAI", "Anthropic", "Google", "xAI", "DeepSeek", "Meta", "Mistral", "Amazon"} <= vendors
+    assert {"OpenAI", "Anthropic", "Google", "xAI", "DeepSeek", "Meta", "Mistral", "Amazon", "Z.ai"} <= vendors
     assert {entry.tier for entry in standard} == set(TIERS)
     # Every standard entry either has an id read from the provider's own listing or says what to confirm.
     for entry in standard:
         assert entry.preferred.verified or entry.preferred.note
-    # Peer evidence: most of the standard set was evaluated by at least one peer deception or negotiation benchmark.
-    with_peers = [entry for entry in standard if entry.peer_benchmarks]
-    assert len(with_peers) >= 11
+    # The paper set: the user's eleven, each the latest of its line, all callable, all in the standard set.
+    paper = paper_roster()
+    assert [e.key for e in paper] == [
+        "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-astra", "gpt-6.1-sol",
+        "gemini-3.1-pro", "gemini-3.8-flash", "deepseek-v4-pro", "grok-4.7", "glm-5.3", "muse-wonder-1.0",
+    ]
+    assert all(e.available and e.standard for e in paper)
+    assert all(e.preferred.verified for e in paper), "every paper route id was read from the provider's own listing"
+    assert {e.sampling for e in paper} == set(SAMPLING_MODES)
+    # Announced but not callable entries fail closed and are never paper entries.
+    argon = MODEL_ROSTER["gemini-4-argon"]
+    assert not argon.available and not argon.paper
+    with pytest.raises(ValueError, match="must be available"):
+        RosterEntry("x", "X", "V", "mid", routes=(Route("xai:x", True, "t"),), standard=True, paper=True, available=False)
+    with pytest.raises(ValueError, match="standard set"):
+        RosterEntry("x", "X", "V", "mid", routes=(Route("xai:x", True, "t"),), paper=True)
+    with pytest.raises(ValueError, match="sampling"):
+        RosterEntry("x", "X", "V", "mid", routes=(Route("xai:x", True, "t"),), sampling="hot")
+    assert sampling_constraint("bedrock:global.anthropic.claude-fable-5-1") == "provider_default_only"
+    assert sampling_constraint("gemini:gemini-3.8-flash") == "provider_default_recommended"
+    assert sampling_constraint("xai:grok-4.7") == "free" and sampling_constraint("bedrock:unknown.model") == "free"
     with pytest.raises(ValueError, match="tier"):
         RosterEntry("x", "X", "V", "ultra", routes=(Route("xai:x", True, "t"),))
     with pytest.raises(ValueError, match="unknown peer benchmarks"):
@@ -144,9 +165,12 @@ def test_roster_entries_are_consistent() -> None:
 
 def test_roster_keys_resolve_to_specs() -> None:
     assert resolve_model_spec("@nova-pro") == "bedrock:us.amazon.nova-pro-v1:0"
-    assert resolve_model_spec("@grok-4.7") == "bedrock:global.xai.grok-4.7"
-    assert resolve_model_spec("@grok-4.7/xai") == "xai:grok-4.7"
-    assert resolve_model_spec("@gpt-5.6-sol/openai") == "openai:gpt-5.6-sol"
+    assert resolve_model_spec("@grok-4.7") == "xai:grok-4.7"
+    assert resolve_model_spec("@grok-4.7/bedrock") == "bedrock:global.xai.grok-4.7"
+    assert resolve_model_spec("@gpt-6-astra") == "bedrock:global.openai.gpt-6-astra"
+    assert resolve_model_spec("@gpt-6-astra/openai") == "openai:gpt-6-astra"
+    with pytest.raises(ModelSpecError, match="not callable yet"):
+        resolve_model_spec("@gemini-4-argon")
     assert resolve_model_spec("xai:grok-4.3") == "xai:grok-4.3" and resolve_model_spec("scripted") == "scripted"
     with pytest.raises(ModelSpecError, match="unknown roster key"):
         resolve_model_spec("@nope")
@@ -158,14 +182,17 @@ def test_roster_keys_resolve_to_specs() -> None:
 
 def test_roster_rendering_and_json(monkeypatch) -> None:
     monkeypatch.delenv("XAI_API_KEY", raising=False)
-    text = format_roster(standard_roster())
-    assert "*gpt-5.6-sol" in text and "CHECK" in text and "missing" in text and "aws" in text
+    text = format_roster(MODEL_ROSTER.values())
+    assert "Pgpt-6-astra" in text and "*nova-pro" in text and "!gemini-4-argon" in text
+    assert "CHECK" in text and "missing" in text and "aws" in text and "DEFAULT" in text
     payload = json.loads(roster_json(MODEL_ROSTER.values()))
     assert payload["roster_version"] == MODEL_ROSTER_VERSION
     assert {e["key"] for e in payload["entries"]} == set(MODEL_ROSTER)
     assert payload["peer_benchmarks"]["DecepEval"]["url"].startswith("https://arxiv.org/")
     nova = next(e for e in payload["entries"] if e["key"] == "nova-pro")
     assert nova["routes"][0]["priced"] is True and nova["routes"][0]["verified"] is True
+    fable = next(e for e in payload["entries"] if e["key"] == "claude-fable-5-1")
+    assert fable["paper"] and fable["sampling"] == "provider_default_only" and fable["reasoning"] == "always_on"
 
 
 def test_cli_roster_and_model_resolution(tmp_path) -> None:
@@ -176,7 +203,9 @@ def test_cli_roster_and_model_resolution(tmp_path) -> None:
     runner = CliRunner()
     listing = runner.invoke(cli, ["roster", "--standard"])
     assert listing.exit_code == 0, listing.output
-    assert "gpt-5.6-sol" in listing.output and "deepseek-v4-pro" in listing.output and "claude-opus-5-5" not in listing.output
+    assert "gpt-6-astra" in listing.output and "deepseek-v4-pro" in listing.output and "gpt-5.6-sol" not in listing.output
+    paper = runner.invoke(cli, ["roster", "--paper", "--json"])
+    assert paper.exit_code == 0 and len(json.loads(paper.output)["entries"]) == 11
     tier = runner.invoke(cli, ["roster", "--tier", "budget", "--json"])
     assert tier.exit_code == 0 and all(e["tier"] == "budget" for e in json.loads(tier.output)["entries"])
     providers = runner.invoke(cli, ["roster", "--providers"])
@@ -199,3 +228,54 @@ def test_run_spec_validates_specs_through_the_registry() -> None:
         RunSpec(model="azure:gpt")
     with pytest.raises(RunSpecError, match="unsupported counterpart_model"):
         RunSpec(model="scripted", counterpart_model="@nova-pro")  # roster keys resolve at the CLI, specs stay literal
+    # Provider default sampling is the default; a fixed temperature is refused for models that reject it.
+    assert RunSpec(model="scripted").temperature is None
+    assert RunSpec(model="xai:grok-4.7", temperature=0.7).temperature == 0.7
+    with pytest.raises(RunSpecError, match="provider default sampling"):
+        RunSpec(model="bedrock:global.anthropic.claude-fable-5-1", temperature=0.7)
+    with pytest.raises(RunSpecError, match="counterpart_model .* provider default"):
+        RunSpec(model="scripted", counterpart_model="bedrock:global.openai.gpt-6-astra", temperature=1.0)
+    with pytest.raises(RunSpecError, match="temperature"):
+        RunSpec(model="scripted", temperature=3.0)
+    with pytest.raises(RunSpecError, match="request_extras"):
+        RunSpec(model="scripted", request_extras=[("effort", "low")])
+    assert RunSpec(model="scripted", request_extras={"effort": "low"}).to_dict()["request_extras"] == {"effort": "low"}
+
+
+def test_adapters_send_nothing_for_provider_default_sampling_and_forward_extras(tmp_path) -> None:
+    from tests.end_bench.test_bedrock_adapter import FakeConverseClient
+    from tests.end_bench.test_openai_compat_adapter import FakeTransport
+
+    client = FakeConverseClient()
+    bedrock = build_text_model("bedrock:global.openai.gpt-6-astra", max_tokens=400, temperature=None,
+                               honor_caller_sampling=False, request_extras={"reasoning_effort": "low"})
+    bedrock._client = client
+    bedrock.sample_text("hi", temperature=1.0, top_p=0.95, max_tokens=2200)
+    request = client.requests[0]
+    assert request["inferenceConfig"] == {"maxTokens": 400}, "no temperature and no topP leave the adapter"
+    assert request["additionalModelRequestFields"] == {"reasoning_effort": "low"}
+    prov = bedrock.get_last_sampling_config()
+    assert prov["sampling_policy"] == "provider_default" and prov["effective"]["temperature"] is None
+    assert prov["effective"]["top_p"] is None and prov["requested"]["temperature"] == 1.0
+    assert prov["additional_request_fields"] == {"reasoning_effort": "low"} and prov["refusal"] is False
+
+    refusing = FakeConverseClient()
+    refusing.converse = lambda **req: {"output": {"message": {"content": [{"text": ""}]}},
+                                       "usage": {"inputTokens": 10, "outputTokens": 0}, "stopReason": "refusal"}
+    fable = BedrockTextModel("bedrock:global.anthropic.claude-fable-5-1", client=refusing, temperature=None)
+    assert fable.sample_text("hi") == "" and fable.refusals == 1 and fable.get_last_sampling_config()["refusal"] is True
+
+    transport = FakeTransport()
+    openai = build_text_model("openai:gpt-6-astra", max_tokens=400, temperature=None, honor_caller_sampling=False,
+                              request_extras={"reasoning_effort": "low"})
+    openai._api_key = "k"
+    openai._transport = transport  # never the real network in tests
+    openai.sample_text("hi", temperature=0.7, top_p=0.9)
+    body = transport.calls[0][2]
+    assert "temperature" not in body and "top_p" not in body and body["reasoning_effort"] == "low"
+    assert openai.get_last_sampling_config()["sampling_policy"] == "provider_default"
+    # A configured temperature still goes out, and direct callers still win when honored.
+    configured = BedrockTextModel("amazon.nova-pro-v1:0", client=FakeConverseClient(), temperature=0.5, honor_caller_sampling=False)
+    configured.sample_text("hi", temperature=1.0)
+    assert configured._client.requests[0]["inferenceConfig"]["temperature"] == 0.5
+    assert configured.get_last_sampling_config()["sampling_policy"] == "configured"

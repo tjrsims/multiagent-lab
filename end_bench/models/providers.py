@@ -96,6 +96,9 @@ _ROWS = (
                  notes="International endpoint; mainland endpoint differs."),
     ProviderSpec("zai", "Z.ai (GLM)", "openai_compat", "https://api.z.ai/api/paas/v4", "ZAI_API_KEY",
                  docs_url="https://docs.z.ai/"),
+    ProviderSpec("meta", "Meta Model API (Muse)", "openai_compat", "https://api.meta.ai/v1", "META_API_KEY",
+                 docs_url="https://dev.meta.ai/docs/api-reference",
+                 notes="Meta's docs call the key MODEL_API_KEY; export it as META_API_KEY here."),
     ProviderSpec("openrouter", "OpenRouter (many vendors)", "openai_compat",
                  "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY",
                  docs_url="https://openrouter.ai/docs",
@@ -133,13 +136,19 @@ def build_text_model(
     spec: str,
     *,
     max_tokens: int,
-    temperature: float,
+    temperature: float | None,
     cost_ledger: Any = None,
     token_budget_per_day: int | None = None,
     honor_caller_sampling: bool = True,
     region: str = "us-east-1",
+    request_extras: Mapping[str, Any] | None = None,
 ) -> Any:
-    """The acting model for ``spec``; adapters publish records with the scheme in their name."""
+    """The acting model for ``spec``; adapters publish records with the scheme in their name.
+
+    ``temperature=None`` means provider default sampling (nothing sent).
+    ``request_extras`` are model specific request fields: Converse
+    ``additionalModelRequestFields`` on Bedrock, extra body keys elsewhere.
+    """
     provider, model_id = parse_model_spec(spec)
     if provider.kind == "scripted":
         from end_bench.models.scripted import ScriptedTextModel
@@ -156,6 +165,7 @@ def build_text_model(
             cost_ledger=cost_ledger,
             token_budget_per_day=token_budget_per_day,
             honor_caller_sampling=honor_caller_sampling,
+            additional_request_fields=request_extras,
         )
     from end_bench.models.openai_compat import OpenAICompatTextModel
 
@@ -170,4 +180,5 @@ def build_text_model(
         cost_ledger=cost_ledger,
         token_budget_per_day=token_budget_per_day,
         honor_caller_sampling=honor_caller_sampling,
+        extra_body=request_extras,
     )

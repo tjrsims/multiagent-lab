@@ -67,7 +67,14 @@ class RunSpec:
     ultrafast: bool = True
     agent_modules: tuple[str, ...] = ()
     max_tokens: int = 160
-    temperature: float = 0.7
+    # None sends no temperature or top_p: the provider's default sampling. Several
+    # frontier models reject any temperature (OpenAI GPT-6 on Converse and on the
+    # OpenAI API, Claude Fable 5.1) and others advise their default (Gemini 3,
+    # DeepSeek V4), so a cross model comparison runs every model this way.
+    temperature: float | None = None
+    # Model specific request fields (Converse additionalModelRequestFields, or
+    # extra body keys on OpenAI compatible endpoints), recorded in the manifest.
+    request_extras: Mapping[str, Any] | None = None
     region: str = "us-east-1"
     run_id: str = ""
     price_table: str | None = None
@@ -99,6 +106,20 @@ class RunSpec:
                 parse_model_spec(self.counterpart_model)
             except ModelSpecError as error:
                 raise RunSpecError(f"unsupported counterpart_model: {error}") from error
+        if self.temperature is not None:
+            if isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)) or not 0.0 <= float(self.temperature) <= 2.0:
+                raise RunSpecError("temperature must be within [0, 2], or None for the provider default")
+            from end_bench.models.roster import sampling_constraint
+
+            for role, name in (("model", self.model), ("counterpart_model", self.counterpart_model)):
+                if name is not None and sampling_constraint(name) == "provider_default_only":
+                    raise RunSpecError(
+                        f"{role} {name!r} accepts only its provider default sampling; leave temperature unset"
+                    )
+        if self.request_extras is not None:
+            if not isinstance(self.request_extras, Mapping) or not all(isinstance(k, str) for k in self.request_extras):
+                raise RunSpecError("request_extras must be a mapping with string keys")
+            object.__setattr__(self, "request_extras", dict(self.request_extras))
         if not self.scenarios:
             raise RunSpecError("at least one scenario is required")
         unknown = set(self.conditions) - SUPPORTED_CONDITIONS
@@ -147,6 +168,7 @@ def _build_model(spec: RunSpec, ledger: CostLedger, model_spec: str | None = Non
             token_budget_per_day=spec.token_budget_per_day,
             honor_caller_sampling=False,
             region=spec.region,
+            request_extras=spec.request_extras,
         )
     except ModelSpecError as error:
         raise RunSpecError(f"unsupported model: {error}") from error
@@ -291,9 +313,13 @@ def run_text_track(
         # What the adapter sends on every acting call. Concordia asks for its
         # own defaults per call; the adapter ignores them and sends these.
         "sampling": {
-            "temperature": spec.temperature,
+            "temperature": spec.temperature if spec.temperature is not None else "provider default (not sent)",
             "max_tokens": spec.max_tokens,
-            "top_p": "adapter default 0.9; not sent to Anthropic models",
+            "top_p": (
+                "not sent (provider default)" if spec.temperature is None
+                else "adapter default 0.9; not sent to Anthropic models"
+            ),
+            "request_extras": dict(spec.request_extras or {}),
             "policy": "run spec values override caller values; the generation records hold requested and effective",
         },
         "started_at": time.time(),

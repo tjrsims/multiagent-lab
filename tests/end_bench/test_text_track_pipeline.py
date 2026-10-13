@@ -364,6 +364,17 @@ def test_run_settings_override_concordia_sampling_defaults(tmp_path, monkeypatch
     assert manifest["sampling"]["temperature"] == 0.7 and manifest["sampling"]["max_tokens"] == 160
 
 
+def test_manifest_records_provider_default_sampling(tmp_path) -> None:
+    spec = RunSpec(model="scripted", scenarios=("ultimatum_bluff",), conditions=("high_incentive",), families=1,
+                   max_rounds=2, rollouts_per_family=1, paired_facts=False, run_id="default-sampling",
+                   request_extras={"effort": "low"})
+    manifest = json.loads(run_text_track(spec, tmp_path, preflight=False).manifest_path.read_text())
+    assert manifest["sampling"]["temperature"] == "provider default (not sent)"
+    assert manifest["sampling"]["top_p"] == "not sent (provider default)"
+    assert manifest["sampling"]["request_extras"] == {"effort": "low"}
+    assert manifest["spec"]["temperature"] is None
+
+
 def test_counterpart_model_is_validated_and_recorded(tmp_path, monkeypatch) -> None:
     """A fixed counterpart is a second injected model; the manifest names the regime."""
     import end_bench.run as run_module

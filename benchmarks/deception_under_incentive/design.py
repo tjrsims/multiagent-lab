@@ -1,5 +1,9 @@
 """Run presets. One run covers one counterpart policy; cross policies by running each.
 
+Sampling: every preset leaves ``temperature`` unset, so each model runs at its
+provider's default sampling. Several frontier models accept nothing else, and a
+cross model comparison must treat them all the same way.
+
 The counterpart model is part of the design. Under self play the acting model
 plays both sides, so each evaluated model faces a different opponent and the
 leaderboard mixes a model's own propensity with its opponent's behavior. The

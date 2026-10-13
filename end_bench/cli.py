@@ -54,7 +54,24 @@ def _common_design_options(f):
                      help='Pace the model under a daily token cap (tokens per rolling 24 hours).')(f)
     f = click.option('--counterpart-model', default=None,
                      help="Fixed counterpart model (<scheme>:<id>, @<roster key>, or 'scripted'); default is self play.")(f)
+    f = click.option('--request-extra', 'request_extras', multiple=True, metavar='KEY=JSON',
+                     help="Model specific request field, e.g. effort=\"low\" (Converse additionalModelRequestFields "
+                          "or an extra body key); repeatable, recorded in the manifest.")(f)
     return f
+
+
+def _parse_request_extras(items):
+    """``KEY=JSON`` pairs -> dict; a bare value that is not JSON is kept as text."""
+    extras = {}
+    for item in items:
+        key, sep, raw = str(item).partition("=")
+        if not sep or not key.strip():
+            raise click.UsageError(f"--request-extra expects KEY=VALUE, got {item!r}")
+        try:
+            extras[key.strip()] = json.loads(raw)
+        except ValueError:
+            extras[key.strip()] = raw
+    return extras or None
 
 
 def _resolve_model(value, option):
@@ -88,7 +105,8 @@ def _spec_from_options(model, **options):
             ultrafast=options["ultrafast"],
             agent_modules=() if options["ultrafast"] else ("theory_of_mind",),
             max_tokens=options["max_tokens"],
-            temperature=options.get("temperature", 0.7),
+            temperature=options.get("temperature"),
+            request_extras=_parse_request_extras(options.get("request_extras") or ()),
             region=options.get("region", "us-east-1"),
             run_id=options["run_id"],
             token_budget_per_day=options.get("token_budget_per_day"),
@@ -129,7 +147,9 @@ def _echo_result(result) -> None:
               help="<scheme>:<model id> (schemes: `end-bench roster --providers`) or @<roster key>, e.g. "
                    "bedrock:global.openai.gpt-5.6-sol, xai:grok-4.3, @claude-sonnet-5.")
 @click.option('--region', default="us-east-1", show_default=True)
-@click.option('--temperature', type=click.FloatRange(0.0, 1.0), default=0.7, show_default=True)
+@click.option('--temperature', type=click.FloatRange(0.0, 2.0), default=None,
+              help="Fixed sampling temperature. Default: the provider's default (nothing sent); several frontier "
+                   "models accept nothing else, and the roster marks them.")
 @click.option('--price-table', type=click.Path(exists=True, dir_okay=False), default=None,
               help='JSON {model_id_prefix: [usd_in, usd_out]} per 1M tokens.')
 @_common_design_options
@@ -504,8 +524,10 @@ def module():
 @click.option('--counterpart-model', default=None,
               help="Fixed counterpart model ('bedrock:<id>' or 'scripted'). The main presets require one; "
                    "the pilot defaults to self play.")
+@click.option('--request-extra', 'request_extras', multiple=True, metavar='KEY=JSON',
+              help="Model specific request field (repeatable, recorded in the manifest).")
 def module_run(name, model, preset, counterpart_types, run_id, out_dir, region, token_budget_per_day,
-               counterpart_model):
+               counterpart_model, request_extras):
     """Run one preset of a module, once per counterpart policy."""
     import dataclasses
     import time as _time
@@ -526,7 +548,8 @@ def module_run(name, model, preset, counterpart_types, run_id, out_dir, region, 
                                            counterpart_model=counterpart_model)
         except RunSpecError as error:
             raise click.UsageError(str(error)) from error
-        spec = dataclasses.replace(spec, region=region, token_budget_per_day=token_budget_per_day)
+        spec = dataclasses.replace(spec, region=region, token_budget_per_day=token_budget_per_day,
+                                   request_extras=_parse_request_extras(request_extras))
         try:
             result = run_text_track(spec, out_dir, module=benchmark)
         except RunSpecError as error:
@@ -654,11 +677,16 @@ def _judge_model(spec: str, region: str, cost_ledger=None):
     from end_bench.models.providers import ModelSpecError, build_text_model
     from end_bench.models.roster import resolve_model_spec
 
+    from end_bench.models.roster import sampling_constraint
+
     try:
         resolved = resolve_model_spec(spec)
         if resolved == "scripted":
             raise ModelSpecError("the scripted model is not a judge")
-        return build_text_model(resolved, max_tokens=400, temperature=0.0, cost_ledger=cost_ledger, region=region)
+        # Judges run greedy where the model allows it; models that accept only
+        # their provider default sampling run that way, recorded per call.
+        temperature = None if sampling_constraint(resolved) == "provider_default_only" else 0.0
+        return build_text_model(resolved, max_tokens=400, temperature=temperature, cost_ledger=cost_ledger, region=region)
     except ModelSpecError as error:
         raise click.UsageError(f"unsupported judge {spec!r}: {error}; use 'oracle', <scheme>:<model id> or @<roster key>") from error
 
@@ -748,10 +776,11 @@ def bedrock_models(region, provider, all_providers, check_access):
 @click.option('--tier', type=click.Choice(["frontier", "mid", "budget"]), default=None, help="Only this tier.")
 @click.option('--standard/--all', 'standard_only', default=False, show_default=True,
               help="Only the standard leaderboard set, or every entry.")
+@click.option('--paper', 'paper_only', is_flag=True, help="Only the paper set (the conference run).")
 @click.option('--scheme', default=None, help="Only entries whose preferred route uses this scheme.")
 @click.option('--providers', 'show_providers', is_flag=True, help="List the provider registry instead.")
 @click.option('--json', 'as_json', is_flag=True, help="Machine readable output.")
-def roster(tier, standard_only, scheme, show_providers, as_json):
+def roster(tier, standard_only, paper_only, scheme, show_providers, as_json):
     """The model roster (which models the benchmark runs on) and the provider registry."""
     from end_bench.models.providers import PROVIDERS
     from end_bench.models.roster import MODEL_ROSTER, MODEL_ROSTER_VERSION, format_roster, roster_json
@@ -768,7 +797,8 @@ def roster(tier, standard_only, scheme, show_providers, as_json):
         click.echo("\nUse <scheme>:<model id> as --model; <SCHEME>_BASE_URL overrides the base url for a proxy.")
         return
     entries = [e for e in MODEL_ROSTER.values()
-               if (not standard_only or e.standard) and (tier is None or e.tier == tier)
+               if (not standard_only or e.standard) and (not paper_only or e.paper)
+               and (tier is None or e.tier == tier)
                and (scheme is None or e.preferred.scheme == scheme)]
     if as_json:
         click.echo(roster_json(entries))
