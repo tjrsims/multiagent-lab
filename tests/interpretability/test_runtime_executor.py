@@ -44,6 +44,7 @@ from interpretability.scenarios.compiled import (
     ExecutionProtocol,
     compile_emergent_scenario,
 )
+from negotiation.game_master.adjudication import ValidationMode, ValidatorBinding
 from negotiation.domain import (
     ActionKind,
     Fact,
@@ -180,6 +181,8 @@ def _executor(
     model_evaluator=None,
     max_retries=1,
     experiment_track='single_agent_white_box',
+    validators=(),
+    counterpart_model_revision=None,
 ):
     actor_model = _ScopedFakeModel()
     counterpart_model = _ScopedFakeModel()
@@ -204,8 +207,25 @@ def _executor(
         model_evaluator=model_evaluator,
         max_retries_per_turn=max_retries,
         experiment_track=experiment_track,
+        adjudicator_validators=validators,
+        counterpart_model_revision=counterpart_model_revision,
     )
     return executor, actor_model, counterpart_model
+
+
+def _reject_price_70(action, context):
+    """Test validator: a hard rejection of any offer priced exactly 70.
+
+    Executor /15 turned a repeated identical offer into a hold, so the retry
+    path needs a hard rejection the text parser cannot absorb.
+    """
+    del context
+    if action.kind is ActionKind.OFFER and action.offer is not None and dict(action.offer.terms).get('price') == 70:
+        return False, 'price 70 is not allowed'
+    return True, None
+
+
+REJECT_70 = (ValidatorBinding(validator_id='test:reject_70', priority=0, mode=ValidationMode.HARD, validator=_reject_price_70),)
 
 
 def _run(executor, **kwargs):
@@ -347,8 +367,9 @@ def test_agent_profiles_are_in_trial_identity_sample_and_resume_contract() -> No
 
 def test_rejected_action_retries_same_actor_and_preserves_every_lineage() -> None:
     executor, _, _ = _executor(
-        ['I offer $70.', 'I offer $70.', 'I offer $75.'],
+        ['I offer $72.', 'I offer $70.', 'I offer $75.'],
         ['I offer $80.', 'I accept your offer.'],
+        validators=REJECT_70,
     )
 
     result = _run(executor, max_rounds=3)
@@ -383,9 +404,10 @@ def test_rejected_action_retries_same_actor_and_preserves_every_lineage() -> Non
 
 def test_retry_exhaustion_transitions_failed_and_projects_no_samples() -> None:
     executor, _, _ = _executor(
-        ['I offer $70.', 'I offer $70.'],
+        ['I offer $72.', 'I offer $70.'],
         ['I offer $80.'],
         max_retries=0,
+        validators=REJECT_70,
     )
 
     result = _run(executor, max_rounds=3)
@@ -1053,8 +1075,9 @@ def test_rejected_action_retry_does_not_repeat_scripted_observation() -> None:
         committed_action_boundary=2,
     )
     executor, _, _ = _executor(
-        ['I offer $70.', 'I offer $70.', 'I offer $75.'],
+        ['I offer $72.', 'I offer $70.', 'I offer $75.'],
         ['I offer $80.', 'I accept your offer.'],
+        validators=REJECT_70,
     )
 
     result = _run(executor, intervention_design=design, max_rounds=3)
@@ -2532,3 +2555,38 @@ def test_adaptive_runtime_requires_module_and_records_track() -> None:
     assert result.completed
     assert result.experiment_track == 'adaptive'
     assert result.activation_samples[0].experiment_track == 'adaptive'
+
+
+def test_restated_standing_offer_is_a_hold_not_a_rejected_duplicate() -> None:
+    """Executor /15: "$70 is my offer, ready at $70?" after an earlier $70 is a hold.
+
+    The first fixed counterpart pilot lost a trial to RetryLimitExceeded because
+    the adjudicator rejected the repeated offer id and the model repeated it again.
+    """
+    executor, _, _ = _executor(
+        ['I offer $70.', 'I offer $70.', 'I offer $70.'],
+        ['I offer $80.', 'I offer $75.', 'I accept your offer.'],
+    )
+    result = _run(executor, max_rounds=3)
+    assert result.completed, result.trial_runner.events[-1].payload
+    seller = [record for record in result.generation_records if record.actor_id == 'Seller']
+    assert [record.attempt for record in seller] == [0, 0, 0], 'no retries were spent'
+    events = result.adjudicator_state['events']
+    seller_kinds = [e['action']['kind'] for e in events if e['action']['actor_id'] == 'Seller']
+    assert seller_kinds == ['offer', 'disclose', 'disclose']
+    assert all(e['status'] == 'committed' for e in events)
+    assert 'restated standing offer' in [e['action'].get('reason') for e in events if e['action']['actor_id'] == 'Seller'][1]
+    # The counterpart's acceptance still binds the standing $70 offer.
+    assert result.completed and events[-1]['action']['kind'] == 'accept'
+
+
+def test_records_carry_the_model_that_made_each_call() -> None:
+    executor, _, _ = _executor(
+        ['I offer $70.'], ['I accept your offer.'], counterpart_model_revision='opponent-model@9',
+    )
+    result = _run(executor)
+    by_actor = {r.actor_id: (r.model_revision, r.tokenizer_revision) for r in result.generation_records}
+    assert by_actor['Seller'] == ('fake-model@1', 'fake-tokenizer@1')
+    assert by_actor['Buyer'] == ('opponent-model@9', 'opponent-model@9')
+    same, _, _ = _executor(['I offer $70.'], ['I accept your offer.'])
+    assert {r.model_revision for r in _run(same).generation_records} == {'fake-model@1'}

@@ -3994,12 +3994,26 @@ Example: yes, yes'''
         tokenizer_revision = str(
             getattr(tokenizer, 'name_or_path', model_revision)
         )
+        # A distinct injected counterpart model (text only track) is named on
+        # its own calls; ``counterpart_model`` above is the closure's agent model
+        # and must not be rebound here.
+        distinct_counterpart = getattr(self, 'counterpart_model', None)
+        counterpart_revision = (
+            str(getattr(distinct_counterpart, 'model_name', type(distinct_counterpart).__name__))
+            if distinct_counterpart is not None else None
+        )
+        counterpart_tokenizer = (
+            str(getattr(getattr(distinct_counterpart, 'tokenizer', None), 'name_or_path', counterpart_revision))
+            if distinct_counterpart is not None else None
+        )
         executor = EmergentTrialExecutor(
             run_id=self.execution_run_id,
             actor_builder=build_actor,
             counterpart_builder=build_counterpart,
             model_revision=model_revision,
             tokenizer_revision=tokenizer_revision,
+            counterpart_model_revision=counterpart_revision,
+            counterpart_tokenizer_revision=counterpart_tokenizer,
             rule_evaluator=evaluate_rule,
             model_evaluator=evaluate_model,
             max_retries_per_turn=max_retries_per_turn,

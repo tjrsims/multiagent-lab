@@ -130,6 +130,7 @@ from negotiation.domain import (
 from negotiation.domain.parsing import parse_observed_action
 from negotiation.domain.schema import freeze_mapping, stable_id, thaw_json
 from negotiation.game_master.adjudication import (
+    ValidatorBinding,
     ActionResolution,
     InteractionEvent,
     NegotiationAdjudicator,
@@ -138,7 +139,7 @@ from negotiation.game_master.components.gm_state import NegotiationStateTracker
 from negotiation.profiles import AgentProfile, validate_agent_profile
 
 
-RUNTIME_EXECUTOR_VERSION = 'emergent-trial-executor/14'  # /13: acceptance needs an acceptance verb; /14: scripted observations reach their target actor only
+RUNTIME_EXECUTOR_VERSION = 'emergent-trial-executor/15'  # /13: acceptance needs an acceptance verb; /14: scripted observations reach their target actor only; /15: a restated standing offer is a hold, and records carry each actor's own model revision
 ACCEPTANCE_PATTERN = r"\b(?:i|we)\s+(?:accept|agree)\b|\b(?:it'?s|that'?s|we\s+have|you\s+have|we've\s+got)\s+a\s+deal\b|(?:^|[.!?]\s*)deal[.!]"
 
 AgentBuilder = Callable[[str, str, Callable[[], Any]], Any]
@@ -762,6 +763,9 @@ class EmergentTrialExecutor:
         experiment_track: ExperimentTrack | str = ExperimentTrack.SINGLE_AGENT_WHITE_BOX,
         policy_registry: CounterpartPolicyRegistry | None = None,
         label_tracks: LabelTrackRegistry | None = None,
+        counterpart_model_revision: str | None = None,
+        counterpart_tokenizer_revision: str | None = None,
+        adjudicator_validators: Sequence[ValidatorBinding] = (),
     ) -> None:
         if not run_id or not model_revision or not tokenizer_revision:
             raise ValueError('Run, model, and tokenizer identities are required')
@@ -772,6 +776,18 @@ class EmergentTrialExecutor:
         self.counterpart_builder = counterpart_builder
         self.model_revision = model_revision
         self.tokenizer_revision = tokenizer_revision
+        # A fixed counterpart may run on another model; its calls must carry
+        # that model's identity, not the actor's (the first fixed counterpart
+        # pilot stamped every Nova Pro call as the Claude actor).
+        self.counterpart_model_revision = counterpart_model_revision or model_revision
+        self.counterpart_tokenizer_revision = (
+            counterpart_tokenizer_revision or self.counterpart_model_revision
+            if counterpart_model_revision else tokenizer_revision
+        )
+        self._counterpart_actor_ids: frozenset[str] = frozenset()
+        # Extra hard or advisory validators for the adjudicator (module rules,
+        # test harnesses); the core protocol validator always runs first.
+        self.adjudicator_validators = tuple(adjudicator_validators)
         self.concordia_version = concordia_version
         self.rule_evaluator = rule_evaluator
         self.model_evaluator = model_evaluator
@@ -788,6 +804,12 @@ class EmergentTrialExecutor:
         self.label_tracks = (
             builtin_label_track_registry() if label_tracks is None else label_tracks
         )
+
+    def _revisions_for(self, actor_id: str) -> tuple[str, str]:
+        """``(model_revision, tokenizer_revision)`` of the model that acts for ``actor_id``."""
+        if actor_id in self._counterpart_actor_ids:
+            return self.counterpart_model_revision, self.counterpart_tokenizer_revision
+        return self.model_revision, self.tokenizer_revision
 
     def _resolve_assignment_policy(
         self, assignment: CounterbalanceAssignment
@@ -1131,6 +1153,7 @@ class EmergentTrialExecutor:
         )
         if execution_protocol is ExecutionProtocol.SOLO_NO_RESPONSE:
             agents = {actor_id: actor}
+            self._counterpart_actor_ids = frozenset()
         else:
             counterpart = self.counterpart_builder(
                 counterpart_id,
@@ -1140,6 +1163,7 @@ class EmergentTrialExecutor:
                 counterpart_scope.scope,
             )
             agents = {actor_id: actor, counterpart_id: counterpart}
+            self._counterpart_actor_ids = frozenset({counterpart_id})
         controllers = {actor_id: actor_scope, counterpart_id: counterpart_scope}
 
         tracker = NegotiationStateTracker(
@@ -1155,6 +1179,7 @@ class EmergentTrialExecutor:
                 if execution_protocol is ExecutionProtocol.SIMULTANEOUS
                 else 'alternating'
             ),
+            validators=self.adjudicator_validators,
         )
         solo_scheduler = (
             SoloNoResponseScheduler(counterpart_id)
@@ -1446,8 +1471,8 @@ class EmergentTrialExecutor:
                     sequence=call_sequence,
                     actor_id=current_actor,
                     purpose=purpose,
-                    model_revision=self.model_revision,
-                    tokenizer_revision=self.tokenizer_revision,
+                    model_revision=self._revisions_for(current_actor)[0],
+                    tokenizer_revision=self._revisions_for(current_actor)[1],
                     concordia_version=self.concordia_version,
                     capture_mode=capture_mode,
                 )
@@ -2265,8 +2290,8 @@ class EmergentTrialExecutor:
             sequence=sequence,
             actor_id=plan.target_actor_id,
             purpose=purpose,
-            model_revision=self.model_revision,
-            tokenizer_revision=self.tokenizer_revision,
+            model_revision=self._revisions_for(plan.target_actor_id)[0],
+            tokenizer_revision=self._revisions_for(plan.target_actor_id)[1],
             concordia_version=self.concordia_version,
             capture_mode=(
                 CaptureMode.TEACHER_FORCED_REPLAY
@@ -2493,8 +2518,8 @@ class EmergentTrialExecutor:
                     if participant_id == primary_actor_id
                     else CallPurpose.COUNTERPART_ACTION
                 ),
-                model_revision=self.model_revision,
-                tokenizer_revision=self.tokenizer_revision,
+                model_revision=self._revisions_for(participant_id)[0],
+                tokenizer_revision=self._revisions_for(participant_id)[1],
                 concordia_version=self.concordia_version,
                 capture_mode=(
                     CaptureMode.TEACHER_FORCED_REPLAY
@@ -3784,15 +3809,31 @@ class EmergentTrialExecutor:
                 if value != actor_id
             )
             amount = observed.actor_offers[-1].amount
+            offer = Offer(
+                actor_id=actor_id,
+                recipient_id=recipient,
+                terms={'price': amount},
+            )
+            if EmergentTrialExecutor._offer_committed(offer.offer_id, events):
+                # "$100 is my final offer. Ready to proceed at $100?" restates
+                # a standing offer. The adjudicator rejects a duplicate offer
+                # id as a hard validation failure, and the retries then failed
+                # whole trials (1 of 21 in the first fixed counterpart pilot,
+                # about 1.5% of part A). A restatement is a hold: the turn
+                # passes, the standing offer stays active, labels still read
+                # the text.
+                return NegotiationAction(
+                    action_ref=generation.call_id,
+                    actor_id=actor_id,
+                    kind=ActionKind.DISCLOSE,
+                    reason=f'restated standing offer {offer.offer_id}',
+                    raw_text=text,
+                )
             return NegotiationAction(
                 action_ref=generation.call_id,
                 actor_id=actor_id,
                 kind=ActionKind.OFFER,
-                offer=Offer(
-                    actor_id=actor_id,
-                    recipient_id=recipient,
-                    terms={'price': amount},
-                ),
+                offer=offer,
                 raw_text=text,
             )
         return NegotiationAction(
@@ -3800,6 +3841,19 @@ class EmergentTrialExecutor:
             actor_id=actor_id,
             kind=ActionKind.DISCLOSE,
             raw_text=text,
+        )
+
+    @staticmethod
+    def _offer_committed(
+        offer_id: str, events: tuple[InteractionEvent, ...]
+    ) -> bool:
+        """Has an offer with this content addressed id already been committed?"""
+        return any(
+            event.committed
+            and event.action.kind is ActionKind.OFFER
+            and event.action.offer is not None
+            and event.action.offer.offer_id == offer_id
+            for event in events
         )
 
     @staticmethod

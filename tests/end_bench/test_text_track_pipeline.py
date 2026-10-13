@@ -412,6 +412,32 @@ def test_counterpart_model_is_validated_and_recorded(tmp_path, monkeypatch) -> N
     assert self_play["counterpart_model"] == "scripted" and self_play["counterpart_regime"] == "self_play"
 
 
+def test_counterpart_records_name_the_counterpart_model(tmp_path, monkeypatch) -> None:
+    """The first fixed counterpart pilot stamped all 96 Nova Pro calls as the Claude actor."""
+    import end_bench.run as run_module
+    from end_bench.models.scripted import ScriptedTextModel
+
+    class _Opponent(ScriptedTextModel):
+        @property
+        def model_name(self) -> str:
+            return "scripted-opponent"
+
+    real_build = run_module._build_model
+    monkeypatch.setattr(run_module, "_build_model",
+                        lambda spec, ledger, model_spec=None: _Opponent(max_tokens=spec.max_tokens, cost_ledger=ledger)
+                        if model_spec is not None else real_build(spec, ledger))
+    spec = RunSpec(model="scripted", counterpart_model="scripted", scenarios=("ultimatum_bluff",),
+                   conditions=("high_incentive",), families=1, max_rounds=2, rollouts_per_family=1,
+                   paired_facts=False, run_id="named-cp")
+    dataset = load_text_dataset(run_text_track(spec, tmp_path, preflight=False).text_dataset_path)
+    actor_role = dataset["metadata"][0]["agent_name"]
+    revisions = {}
+    for record in dataset["generation_records"]:
+        revisions.setdefault(record["actor_id"], set()).add(record["model_revision"])
+    assert revisions[actor_role] == {"scripted:offline"}
+    assert {rev for role, revs in revisions.items() if role != actor_role for rev in revs} == {"scripted-opponent"}
+
+
 def test_runner_binds_the_counterpart_model_only_beside_an_injected_actor() -> None:
     from end_bench.models.scripted import ScriptedTextModel
     from interpretability.evaluation import InterpretabilityRunner
