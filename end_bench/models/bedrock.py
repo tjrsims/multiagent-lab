@@ -43,6 +43,10 @@ RETRYABLE_ERROR_CODES = frozenset({
     "ModelNotReadyException",
     "ModelTimeoutException",
     "ServiceQuotaExceededException",
+    # "The system encountered an unexpected error during processing. Try your
+    # request again." A Nova Pro counterpart call failed a dry run trial on the
+    # first such error with zero retries.
+    "ModelErrorException",
 })
 RETRYABLE_EXCEPTION_NAMES = frozenset({
     "ReadTimeoutError",

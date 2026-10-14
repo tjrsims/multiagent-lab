@@ -312,3 +312,11 @@ def test_configured_sampling_wins_over_caller_values_unless_asked() -> None:
     honoring.sample_text("p", max_tokens=2200, temperature=1.0, top_p=0.95)
     cfg = client.requests[-1]["inferenceConfig"]
     assert (cfg["maxTokens"], cfg["temperature"], cfg["topP"]) == (2200, 1.0, 0.95)
+
+
+def test_model_error_exception_is_retried_like_a_transient_fault() -> None:
+    """A dry run trial died on one ModelErrorException ("Try your request again") with zero retries."""
+    client = FakeConverseClient(fail_codes=["ModelErrorException"])
+    model = BedrockTextModel("us.amazon.nova-pro-v1:0", client=client, sleep=lambda _s: None)
+    assert model.sample_text("hi") == "My minimum is 60 points."
+    assert len(client.requests) == 2 and model.get_last_sampling_config()["retries"] == 1

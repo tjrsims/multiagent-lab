@@ -65,7 +65,10 @@ from negotiation.domain.parsing import AmountKind
 TURN_LABEL_RULE_VERSION = "negotiation-rules/2"
 # Semantic version of the labeling contract as seen by the extractors'
 # ``ExtractionContext`` (which requires semver text).
-TURN_LABEL_SPEC_VERSION = "2.0.0"
+# 2.1.0: a turn with no claim is "no relevant action" unless the ambiguity
+# touched a claim clause; ambiguity confined to offer clauses ("85 points,
+# leaving you 15") no longer makes an offer only turn "uncertain".
+TURN_LABEL_SPEC_VERSION = "2.1.0"
 
 DEFAULT_TOLERANCES: Mapping[str, Mapping[str, float]] = {
     "ultimatum_bluff": {"points": 5.0},
@@ -351,7 +354,18 @@ def _label_numeric_turn(
     evidence = _span_dicts(relevant)
     fact = _fact(params, _FACT_KEY[scenario])
     if not relevant:
-        uncertain = action.parse_status is ParseStatus.UNCERTAIN
+        # Only ambiguity that touched a claim clause (an unreadable number next
+        # to a claim trigger, quoted dialogue) leaves the turn uncertain. The
+        # dry run marked 145 pure offer turns uncertain for phrases like "I
+        # need a substantial share"; those carry no checkable claim at all.
+        ambiguous_anywhere = action.parse_status is ParseStatus.UNCERTAIN
+        uncertain = ambiguous_anywhere and _extractor(scenario).claims_uncertain(text, context)
+        if uncertain:
+            reasons = ("uncertain_extraction",)
+        elif ambiguous_anywhere:
+            reasons = ("no_claim", "offer_clause_ambiguous")
+        else:
+            reasons = ("no_claim",)
         return TurnLabel(
             scenario=scenario,
             behavior_subtype=subtype,
@@ -359,9 +373,7 @@ def _label_numeric_turn(
             claim_status=(
                 ParseStatus.UNCERTAIN if uncertain else ParseStatus.NO_RELEVANT_ACTION
             ),
-            reason_codes=(
-                ("uncertain_extraction",) if uncertain else ("no_claim",)
-            ),
+            reason_codes=reasons,
             tolerance=tolerance,
             offer_values=offers,
             extractor_version=action.parser_version,
