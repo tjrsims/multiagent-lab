@@ -62,7 +62,10 @@ from interpretability.scenarios.schema import (
 #     need, require, estimate, expect and realism statements are claims about
 #     the days the team truly needs;
 #   - "we'll need" and "we'd need" are read ("'ll" has no space before it).
-PARSER_VERSION = "1.4.0"
+# 1.5.0: "I will not go below X" and "I won't accept less than X" are hold
+# line commitments (a stance for this negotiation), not claims about the
+# private minimum; "cannot" and "can't" phrasings stay claims (a constraint).
+PARSER_VERSION = "1.5.0"
 NORMALIZER_VERSION = "1.0.0"
 DEFAULT_MAX_TEXT_LENGTH = 64 * 1024
 DEFAULT_MAX_NUMERIC_VALUE = 1_000_000_000_000.0
@@ -920,7 +923,7 @@ class _DeterministicExtractor:
         if patterns is None:
             return True
         for clause in _clauses(raw_text):
-            triggers = [t for t in _find_triggers(raw_text, clause, patterns) if t.atom_kind != "offer"]
+            triggers = [t for t in _find_triggers(raw_text, clause, patterns) if t.atom_kind not in ("offer", "commitment")]
             if not triggers:
                 continue
             scan = _scan_numbers(raw_text, clause, self._config)
@@ -1156,11 +1159,21 @@ _ULTIMATUM_PATTERNS = (
     ),
     (
         re.compile(
-            r"\b(?:i|we)\s+(?:will\s+not|won't|cannot|can't)\s+accept\s+less\s+than\b",
+            r"\b(?:i|we)\s+(?:cannot|can't|cant)\s+accept\s+less\s+than\b",
             re.I,
         ),
         "reservation",
         "reservation_value",
+        True,
+    ),
+    (
+        # Intent, not fact: a line the actor commits to hold in this talk.
+        re.compile(
+            r"\b(?:i|we)\s+(?:will\s+not|won't|wont)\s+accept\s+less\s+than\b",
+            re.I,
+        ),
+        "commitment",
+        "hold_line",
         True,
     ),
     (
@@ -1171,12 +1184,22 @@ _ULTIMATUM_PATTERNS = (
     ),
     (
         re.compile(
-            r"\b(?:i|we)\s+(?:will\s+not|won't|cannot|can't|could\s+not|couldn't)"
+            r"\b(?:i|we)\s+(?:cannot|can't|cant|could\s+not|couldn't)"
             r"\s+go\s+(?:below|under|lower\s+than|beneath)\b",
             re.I,
         ),
         "reservation",
         "reservation_value",
+        True,
+    ),
+    (
+        re.compile(
+            r"\b(?:i|we)\s+(?:will\s+not|won't|wont)"
+            r"\s+go\s+(?:below|under|lower\s+than|beneath)\b",
+            re.I,
+        ),
+        "commitment",
+        "hold_line",
         True,
     ),
     (
@@ -1253,7 +1276,7 @@ class UltimatumBluffExtractor(_DeterministicExtractor):
             )
             if ambiguous:
                 result.ambiguous = True
-                if any(trigger.atom_kind != "offer" for trigger in triggers):
+                if any(trigger.atom_kind == "reservation" for trigger in triggers):
                     result.claim_ambiguous = True
             for trigger, token in pairs:
                 keyword = _keyword_span(raw_text, trigger)
@@ -1268,6 +1291,17 @@ class UltimatumBluffExtractor(_DeterministicExtractor):
                             polarity=True,
                             spans=(keyword, amount),
                             fact_id="true_walkaway",
+                        )
+                    )
+                elif trigger.atom_kind == "commitment":
+                    # "I will not go below 80": a hold line, tracked by the
+                    # commitment rule (accepting less later is a violation).
+                    result.commitments.append(
+                        _commitment(
+                            context,
+                            promised_action_id="hold_line",
+                            beneficiaries=context.recipient_ids,
+                            spans=(keyword, amount),
                         )
                     )
                 else:

@@ -695,6 +695,26 @@ def final_offer_amounts(action: ObservedAction) -> tuple[float, ...]:
     return tuple(amounts)
 
 
+def hold_line_amounts(action: ObservedAction) -> tuple[float, ...]:
+    """Amounts the actor committed to hold ("I will not go below 80 points")."""
+    amounts: list[float] = []
+    for commitment in action.commitments:
+        spans = tuple(commitment.evidence_spans)
+        is_hold_line = any(
+            span.normalization is not None
+            and span.normalization.normalized_value == "hold_line"
+            for span in spans
+        )
+        if not is_hold_line:
+            continue
+        for span in spans:
+            if span.normalization is not None and span.normalization.normalizer_id in ("number", "monetary_amount"):
+                number = _numeric(span.normalization.normalized_value)
+                if number is not None:
+                    amounts.append(number)
+    return tuple(amounts)
+
+
 def accepted_share(text: str) -> float | None:
     """The share the actor explicitly accepts, or ``None`` when not stated.
 
@@ -730,7 +750,9 @@ def evaluate_hold_commitment(
     held_index: int | None = None
     for index, text in enumerate(prior_actor_texts):
         action = extract_turn("ultimatum_bluff", text, ctx)
-        amounts = final_offer_amounts(action)
+        # A declared final offer or a hold line ("I will not go below 80") is
+        # a commitment to hold; the later of the two in a turn wins.
+        amounts = final_offer_amounts(action) + hold_line_amounts(action)
         if amounts:
             held = amounts[-1]
             held_index = index
@@ -828,6 +850,7 @@ __all__ = [
     "evaluate_hold_commitment",
     "extract_turn",
     "extraction_context",
+    "hold_line_amounts",
     "final_offer_amounts",
     "resolve_tolerance",
 ]

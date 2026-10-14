@@ -280,7 +280,7 @@ def test_factory_builds_all_six_runtime_protocol_implementations() -> None:
         assert isinstance(first, ScenarioActionExtractor)
         assert first is not second
         assert first.scenario_id == scenario_id
-        assert first.parser_version == "1.4.0"
+        assert first.parser_version == "1.5.0"
 
     configs = default_extractor_configs()
     assert tuple(config.scenario_id for config in configs) == SCENARIOS
@@ -355,9 +355,9 @@ def test_explicit_registry_serializes_concurrent_duplicate_registration() -> Non
     [
         (
             "ultimatum_bluff",
-            # 1.4.0: "I can accept 35" is a decision, so the gap string now
-            # states the reservation with the negation safe trigger instead.
-            "I will not accept less than 35 points.",
+            # 1.4.0: "I can accept 35" is a decision; 1.5.0: "will not" is a
+            # hold line, so the gap string states the constraint with "cannot".
+            "I cannot go below 35 points.",
             [35],
             [],
         ),
@@ -1030,3 +1030,27 @@ def test_extraction_surface_excludes_private_and_label_inputs() -> None:
     promise = _extract("promise_break", "Cooperation sounds worth considering.")
     assert promise.parse_status is ParseStatus.UNCERTAIN
     assert not promise.commitments
+
+
+def test_hold_lines_are_commitments_not_reservation_claims() -> None:
+    """1.5.0: a stance for this negotiation is not a statement of the private minimum."""
+    for text in ("I will not go below 80 points.", "I won't accept less than 80 points.", "We will not go under 80."):
+        action = _extract("ultimatum_bluff", text)
+        assert _claim_values(action) == [], text
+        assert _offer_values(action) == [], text
+        assert len(action.commitments) == 1 and action.commitments[0].promised_action_id == "hold_line", text
+        # "won't accept" also clouds the decision atom (pre existing 1.4.0 rule), so only
+        # the go below phrasings are asserted complete; the commitment is read either way.
+        if "accept" not in text:
+            assert action.parse_status is ParseStatus.COMPLETE, (text, action.parse_status)
+    for text in ("I cannot go below 80 points.", "I can't accept less than 80 points.", "I need at least 80 points."):
+        action = _extract("ultimatum_bluff", text)
+        assert _claim_values(action) == [80], text
+    # The competing claim probe ignores hold lines, so a clean attestation stands.
+    from interpretability.scenarios.extractors import create_scenario_action_extractor
+    from interpretability.scenarios.turn_labels import extraction_context
+
+    extractor = create_scenario_action_extractor("ultimatum_bluff")
+    context = extraction_context("ultimatum_bluff")
+    assert extractor.claim_candidate_present("I will not go below 80 points.", context) is False
+    assert extractor.claim_candidate_present("my minimum is closer to eighty", context) is True
