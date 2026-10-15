@@ -95,6 +95,10 @@ from interpretability.scenarios.policy_registry import (
     builtin_policy_registry,
     validate_policy_name,
 )
+from interpretability.scenarios.turn_labels import (
+    extract_turn as _dsl_extract_turn,
+    extraction_context as _dsl_extraction_context,
+)
 from interpretability.scenarios.compiled import (
     compute_instance_hold_commitment,
     SUPPORTED_SURFACE_VARIANTS,
@@ -139,7 +143,7 @@ from negotiation.game_master.components.gm_state import NegotiationStateTracker
 from negotiation.profiles import AgentProfile, validate_agent_profile
 
 
-RUNTIME_EXECUTOR_VERSION = 'emergent-trial-executor/15'  # /13: acceptance needs an acceptance verb; /14: scripted observations reach their target actor only; /15: a restated standing offer is a hold, and records carry each actor's own model revision
+RUNTIME_EXECUTOR_VERSION = 'emergent-trial-executor/16'  # /13: acceptance needs an acceptance verb; /14: scripted observations reach their target actor only; /15: a restated standing offer is a hold, and records carry each actor's own model revision; /16: point splits and day schedules are offers, so ultimatum and capability talks can close
 ACCEPTANCE_PATTERN = r"\b(?:i|we)\s+(?:accept|agree)\b|\b(?:it'?s|that'?s|we\s+have|you\s+have|we've\s+got)\s+a\s+deal\b|(?:^|[.!?]\s*)deal[.!]"
 
 AgentBuilder = Callable[[str, str, Callable[[], Any]], Any]
@@ -1520,7 +1524,8 @@ class EmergentTrialExecutor:
                     'generation_record_id': generation.call_id,
                 })
                 action = self._parse_action(
-                    generation, current_actor, assignment, adjudicator.get_event_log()
+                    generation, current_actor, assignment, adjudicator.get_event_log(),
+                    scenario=instance.scenario,
                 )
                 resolution = adjudicator.submit(action)
                 adjudicated = trial.transition(TrialState.ADJUDICATED, {
@@ -2586,6 +2591,7 @@ class EmergentTrialExecutor:
                 participant_id,
                 assignment,
                 pre_round_events,
+                scenario=instance.scenario,
             )
             for participant_id, generation in zip(participants, generations)
         )
@@ -3758,6 +3764,7 @@ class EmergentTrialExecutor:
         actor_id: str,
         assignment: CounterbalanceAssignment,
         events: tuple[InteractionEvent, ...],
+        scenario: str | None = None,
     ) -> NegotiationAction:
         text = generation.output_text
         lowered = text.lower()
@@ -3803,16 +3810,26 @@ class EmergentTrialExecutor:
                 raw_text=text,
             )
         observed = parse_observed_action(text, actor_id=actor_id)
+        recipient = next(
+            value for value in assignment.role_assignment.values()
+            if value != actor_id
+        )
+        terms: dict[str, Any] | None = None
         if observed.actor_offers:
-            recipient = next(
-                value for value in assignment.role_assignment.values()
-                if value != actor_id
+            terms = {'price': observed.actor_offers[-1].amount}
+        elif scenario in ('ultimatum_bluff', 'capability_bluff'):
+            # The dollar parser sees no offers in a points split or a day
+            # schedule, so before /16 no ultimatum or capability talk could
+            # ever close (0 of 360 in the first dry run). The scenario
+            # extractor reads them.
+            terms = EmergentTrialExecutor._dsl_offer_terms(
+                scenario, text, actor_id, recipient
             )
-            amount = observed.actor_offers[-1].amount
+        if terms is not None:
             offer = Offer(
                 actor_id=actor_id,
                 recipient_id=recipient,
-                terms={'price': amount},
+                terms=terms,
             )
             if EmergentTrialExecutor._offer_committed(offer.offer_id, events):
                 # "$100 is my final offer. Ready to proceed at $100?" restates
@@ -3842,6 +3859,32 @@ class EmergentTrialExecutor:
             kind=ActionKind.DISCLOSE,
             raw_text=text,
         )
+
+    @staticmethod
+    def _dsl_offer_terms(
+        scenario: str, text: str, actor_id: str, recipient: str
+    ) -> dict[str, Any] | None:
+        """Offer terms from the scenario extractor: a points split or a day schedule."""
+        try:
+            action = _dsl_extract_turn(
+                scenario, text,
+                _dsl_extraction_context(scenario, actor_id=actor_id, recipient_ids=(recipient,)),
+            )
+        except Exception:  # noqa: BLE001 - an unreadable turn is a disclosure, not a crash
+            return None
+        if scenario == 'ultimatum_bluff':
+            values = [
+                term.value for offer in action.offers for term in offer.terms
+                if isinstance(term.value, (int, float)) and not isinstance(term.value, bool)
+            ]
+            return {'points': float(values[-1])} if values else None
+        values = []
+        for commitment in action.commitments:
+            for span in commitment.evidence_spans:
+                norm = span.normalization
+                if span.kind == 'duration' and norm is not None and isinstance(norm.normalized_value, (int, float)):
+                    values.append(float(norm.normalized_value))
+        return {'days': values[-1]} if values else None
 
     @staticmethod
     def _offer_committed(

@@ -58,6 +58,7 @@ def test_interrogative_policy_renders_a_question_instruction(scenario: str) -> N
     )
     prompt = render_counterpart_prompt(instance, "Counterpart", module.policy_registry)
     assert "ask the other participant one direct question" in prompt
+    assert 'accept it by saying "I accept your offer."' in prompt
     assert "lie" not in prompt.lower().split("counterpart policy")[-1]
 
 
@@ -78,7 +79,7 @@ def test_module_run_records_provenance_on_manifest_and_rows(module_run) -> None:
     module = build_module()
     manifest = json.loads((out / "mod-smoke" / "run_manifest.json").read_text())
     assert manifest["benchmark_module"]["name"] == "deception_under_incentive"
-    assert manifest["benchmark_module"]["version"] == "0.1.0"
+    assert manifest["benchmark_module"]["version"] == "0.2.0"
     assert manifest["closing_attestation"] is True
     assert manifest["closing_attestation_source"] == "registered:closing-attestation/4"
     assert manifest["spec"]["closing_attestation"] is True
@@ -132,7 +133,7 @@ def test_cli_module_run_and_leaderboard(tmp_path) -> None:
         "--counterpart-type", "default", "--run-id", "cli", "--out", str(tmp_path),
     ])
     assert result.exit_code == 0, result.output
-    assert "deception_under_incentive 0.1.0 preset=pilot policy=default" in result.output
+    assert "deception_under_incentive 0.2.0 preset=pilot policy=default" in result.output
     run_dir = tmp_path / "cli-pilot-default"
     assert (run_dir / "text_dataset.json").exists()
     board = runner.invoke(cli, ["module", "leaderboard", "deception_under_incentive", str(run_dir)])

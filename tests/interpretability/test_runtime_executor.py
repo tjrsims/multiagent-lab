@@ -1374,7 +1374,7 @@ def test_simultaneous_rejection_retries_the_entire_batch(monkeypatch) -> None:
     )
     original_parse = EmergentTrialExecutor._parse_action
 
-    def reject_first_buyer(generation, actor_id, assignment, events):
+    def reject_first_buyer(generation, actor_id, assignment, events, scenario=None):
         if generation.attempt == 0 and actor_id == 'Buyer':
             return NegotiationAction(
                 action_ref=generation.call_id,
@@ -1387,7 +1387,7 @@ def test_simultaneous_rejection_retries_the_entire_batch(monkeypatch) -> None:
                 ),
                 raw_text=generation.output_text,
             )
-        return original_parse(generation, actor_id, assignment, events)
+        return original_parse(generation, actor_id, assignment, events, scenario=scenario)
 
     submit_calls = 0
     original_submit_batch = NegotiationAdjudicator.submit_batch
@@ -2590,3 +2590,36 @@ def test_records_carry_the_model_that_made_each_call() -> None:
     assert by_actor['Buyer'] == ('opponent-model@9', 'opponent-model@9')
     same, _, _ = _executor(['I offer $70.'], ['I accept your offer.'])
     assert {r.model_revision for r in _run(same).generation_records} == {'fake-model@1'}
+
+
+def test_point_splits_and_day_schedules_are_offers_the_counterpart_can_accept() -> None:
+    """Executor /16. The first dry run closed 0 of 360 ultimatum and capability talks
+    because only dollar amounts were offers."""
+    executor, _, _ = _executor(
+        ['**Counter-offer: I propose taking 60 points, leaving you 40 points.**'],
+        ['I accept your offer.'],
+    )
+    result = _run(executor, scenario='ultimatum_bluff', role_assignment={'actor': 'Negotiator', 'counterpart': 'Counterpart'})
+    events = result.adjudicator_state['events']
+    kinds = [(e['action']['actor_id'], e['action']['kind']) for e in events if e['status'] == 'committed']
+    assert kinds == [('Negotiator', 'offer'), ('Counterpart', 'accept')]
+    assert dict(events[0]['action']['offer']['terms']) == {'points': 60.0}
+
+    executor, _, _ = _executor(
+        ['We can deliver the full scope in 30 days with proper quality checks.'],
+        ['I accept your offer.'],
+    )
+    result = _run(executor, scenario='capability_bluff', role_assignment={'actor': 'Negotiator', 'counterpart': 'Counterpart'})
+    events = result.adjudicator_state['events']
+    kinds = [(e['action']['actor_id'], e['action']['kind']) for e in events if e['status'] == 'committed']
+    assert kinds == [('Negotiator', 'offer'), ('Counterpart', 'accept')]
+    assert dict(events[0]['action']['offer']['terms']) == {'days': 30.0}
+
+    # A dollar offer still wins over the scenario extractor, and a turn with no
+    # offer of any kind is still a disclosure.
+    executor, _, _ = _executor(['I offer $70.'], ['I accept your offer.'])
+    result = _run(executor)
+    assert dict(result.adjudicator_state['events'][0]['action']['offer']['terms']) == {'price': 70}
+    executor, _, _ = _executor(['Tell me more about your needs first.'], ['Sure, here they are.'])
+    result = _run(executor, scenario='ultimatum_bluff', role_assignment={'actor': 'Negotiator', 'counterpart': 'Counterpart'})
+    assert all(e['action']['kind'] == 'disclose' for e in result.adjudicator_state['events'])

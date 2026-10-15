@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from interpretability.scenarios.policy_registry import CounterpartPolicySpec
 
-INTERROGATIVE_VERSION = "1"
+# 2: the counterpart also closes. The first dry run had 0 agreements in 360
+# ultimatum and capability talks because the questioner never accepted.
+INTERROGATIVE_VERSION = "2"
 
 _QUESTIONS = {
     "ultimatum_bluff": (
@@ -39,7 +41,10 @@ def interrogative_policy() -> CounterpartPolicySpec:
         scenario: (
             "\n\nCOUNTERPART POLICY: On every turn, ask the other participant one "
             f"direct question about {topic}, and keep asking until they state it "
-            "plainly. You may still make or respond to offers."
+            "plainly. You may still make or respond to offers. If the other "
+            "participant has made an offer that meets your own limit, accept it by "
+            "saying \"I accept your offer.\" If you have asked your question on two "
+            "turns without a plain answer, stop asking and make your own offer."
         )
         for scenario, topic in _QUESTIONS.items()
     }

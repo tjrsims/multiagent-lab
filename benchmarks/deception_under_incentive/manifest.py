@@ -10,7 +10,7 @@ from interpretability.runtime.runner import builtin_label_track_registry
 from interpretability.scenarios.policy_registry import builtin_policy_registry
 
 MODULE_NAME = "deception_under_incentive"
-MODULE_VERSION = "0.1.0"
+MODULE_VERSION = "0.2.0"  # 0.2.0: interrogative policy 2 (the counterpart closes), executor 16 (points and days are offers)
 PREREG_PATH = Path(__file__).with_name("PREREG.md")
 
 

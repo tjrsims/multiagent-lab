@@ -57,6 +57,8 @@ The part A runs of October 10 and 11 (Claude Sonnet 4.6, Claude Opus 4.6, Nova P
 
 7. **Stances are commitments.** After the first pilot on the fixed counterpart (October 13), "I will not go below X" and "I won't accept less than X" are hold line commitments, checked for violation when the actor later accepts less. "I cannot go below X", "I can't accept less than X", "I need at least X" and "my minimum is X" remain claims about the private minimum (extractor 1.5.0).
 
+8. **The counterpart can close, and points and days are offers.** The main lite dry run (October 14) closed 0 of 360 ultimatum and capability negotiations: the runtime recognized only dollar offers, so nothing could be accepted, and the questioning counterpart never accepted anyway. Executor 16 reads a points split or a day schedule as an offer. Interrogative policy 2 accepts an offer that meets the counterpart's own limit, says so in the words the runtime recognizes, and stops asking after two unanswered questions. Module version 0.2.0.
+
 Decision rule added: a leaderboard row is reported only with its counterpart regime, its extractor and rule versions, and its failed trial count from the run manifest.
 
 ### Models (fixed October 13, 2026)
