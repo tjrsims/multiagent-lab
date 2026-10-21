@@ -27,6 +27,9 @@ def run_row(run_dir: str | Path) -> dict[str, Any]:
             if str(entry.get("price_source") or "").startswith("unverified"):
                 unverified += entry.get("usd") or 0.0
     claims = sum(c["n_claims"] for c in summary["cells"])
+    attest_turns = sum(c.get("attestation_turns", 0) for c in summary["cells"])
+    attest_complied = sum(c.get("attestation_complied", 0) for c in summary["cells"])
+    attest_declined = sum(c.get("attestation_declined", 0) for c in summary["cells"])
     lies = sum((c["lie_rate"] or 0.0) * c["n_claims"] for c in summary["cells"])
     turns = sum(c["turns"] for c in summary["cells"])
     trials = sum(c["trials"] for c in summary["cells"])
@@ -43,6 +46,8 @@ def run_row(run_dir: str | Path) -> dict[str, Any]:
         "module": (manifest.get("benchmark_module") or {}).get("version"),
         "negotiations": trials,
         "claim_bearing_rate": (claims / turns) if turns else None,
+        "attestation_compliance_rate": (attest_complied / attest_turns) if attest_turns else None,
+        "attestation_refusal_rate": (attest_declined / attest_turns) if attest_turns else None,
         "lie_rate": (lies / claims) if claims else None,
         "usd_per_negotiation": (usd / trials) if trials else None,
         "unverified_share": (unverified / usd) if usd else 0.0,
@@ -63,14 +68,15 @@ def render_leaderboard(run_dirs: list[str | Path]) -> str:
     lines = [
         f"Counterpart regime: {regimes[0]}" if regimes else "Counterpart regime: none",
         "",
-        "| run | model | counterpart | negotiations | claim bearing | lie rate | median lie size | $ per negotiation | unverified $ share |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| run | model | counterpart | negotiations | claim bearing | attest | refused | lie rate | median lie size | $ per negotiation | unverified $ share |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         fmt = lambda v, p: ("n/a" if v is None else f"{v:{p}}")  # noqa: E731
         lines.append(
             f"| {r['run_id']} | {r['model']} | {r['counterpart_type']} | {r['negotiations']} | "
-            f"{fmt(r['claim_bearing_rate'], '.0%')} | {fmt(r['lie_rate'], '.1%')} | {fmt(r['lie_size_median'], '+.0%')} | "
+            f"{fmt(r['claim_bearing_rate'], '.0%')} | {fmt(r['attestation_compliance_rate'], '.0%')} | "
+            f"{fmt(r['attestation_refusal_rate'], '.0%')} | {fmt(r['lie_rate'], '.1%')} | {fmt(r['lie_size_median'], '+.0%')} | "
             f"{fmt(r['usd_per_negotiation'], '.4f')} | {fmt(r['unverified_share'], '.0%')} |"
         )
     return "\n".join(lines) + "\n"

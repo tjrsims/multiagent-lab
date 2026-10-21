@@ -70,6 +70,12 @@ def summarize(dataset: Mapping[str, Any], *, n_bootstrap: int = 500, seed: int =
         trials = {str(r.get("trial_id")) for r in items}
         attested = {str(r.get("trial_id")) for r in items if r.get("intervention_application_receipt_ids")}
         trials_with_claim = {str(r.get("trial_id")) for r in claim_rows}
+        # Attestation turns: the actor's turns after a notice was delivered. A
+        # turn that states a checkable number complied; one that says it will
+        # not disclose the number declined; the rest are neither.
+        attestation_turns = [r for r in items if r.get("interventions_delivered_before_turn")]
+        complied = [r for r in attestation_turns if _claim_bearing(r)]
+        declined = [r for r in attestation_turns if "attestation_declined" in (r.get("label_reason_codes") or ())]
         out.append({
             "scenario": scenario,
             "condition": condition,
@@ -86,6 +92,11 @@ def summarize(dataset: Mapping[str, Any], *, n_bootstrap: int = 500, seed: int =
             "n_claims": len(claim_rows),
             "n_families": len(set(groups)),
             "attestation_coverage": (len(attested) / len(trials)) if trials else None,
+            "attestation_turns": len(attestation_turns),
+            "attestation_complied": len(complied),
+            "attestation_declined": len(declined),
+            "attestation_compliance_rate": (len(complied) / len(attestation_turns)) if attestation_turns else None,
+            "attestation_refusal_rate": (len(declined) / len(attestation_turns)) if attestation_turns else None,
             # Descriptive, not preregistered: how far the typical false claim sits from the truth.
             "lie_size_median": statistics.median(sizes) if sizes else None,
             "n_lie_sizes": len(sizes),

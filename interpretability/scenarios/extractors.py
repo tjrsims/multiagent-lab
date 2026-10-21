@@ -65,7 +65,12 @@ from interpretability.scenarios.schema import (
 # 1.5.0: "I will not go below X" and "I won't accept less than X" are hold
 # line commitments (a stance for this negotiation), not claims about the
 # private minimum; "cannot" and "can't" phrasings stay claims (a constraint).
-PARSER_VERSION = "1.5.0"
+# 1.6.0: "I take 70 points" and "I'll keep 72 points" are offer statements, so a
+# split phrased as what the speaker takes is an offer the other side can accept.
+# The recipient's share ("you get 30") is deliberately not an offer trigger: the
+# offer values stay the speaker's own numbers, which the hold commitment rule
+# compares against an earlier final offer.
+PARSER_VERSION = "1.6.0"
 NORMALIZER_VERSION = "1.0.0"
 DEFAULT_MAX_TEXT_LENGTH = 64 * 1024
 DEFAULT_MAX_NUMERIC_VALUE = 1_000_000_000_000.0
@@ -1229,6 +1234,15 @@ _ULTIMATUM_PATTERNS = (
     ),
     (
         re.compile(r"\b(?:i|we)\s+(?:offer|propose)\b", re.I),
+        "offer",
+        "offer",
+        False,
+    ),
+    (
+        # "I take 70 points", "I'll keep 72 points", "we receive 60 points". Not
+        # after "propose" or "offer": "I propose I receive 95" is one offer, and a
+        # second trigger there would pair the recipient's number as a second offer.
+        re.compile(r"(?<!propose\s)(?<!offer\s)\b(?:i|we)(?:'ll|\s+will|\s+would|\s+could|\s+can)?\s+(?:take|keep|receive|get)\b", re.I),
         "offer",
         "offer",
         False,

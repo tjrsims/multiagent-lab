@@ -2603,7 +2603,8 @@ def test_point_splits_and_day_schedules_are_offers_the_counterpart_can_accept() 
     events = result.adjudicator_state['events']
     kinds = [(e['action']['actor_id'], e['action']['kind']) for e in events if e['status'] == 'committed']
     assert kinds == [('Negotiator', 'offer'), ('Counterpart', 'accept')]
-    assert dict(events[0]['action']['offer']['terms']) == {'points': 60.0}
+    terms = dict(events[0]['action']['offer']['terms'])
+    assert terms['points'] == 60.0 and terms['points_speaker'] == 60.0 and terms['points_recipient'] == 40.0
 
     executor, _, _ = _executor(
         ['We can deliver the full scope in 30 days with proper quality checks.'],
@@ -2623,3 +2624,89 @@ def test_point_splits_and_day_schedules_are_offers_the_counterpart_can_accept() 
     executor, _, _ = _executor(['Tell me more about your needs first.'], ['Sure, here they are.'])
     result = _run(executor, scenario='ultimatum_bluff', role_assignment={'actor': 'Negotiator', 'counterpart': 'Counterpart'})
     assert all(e['action']['kind'] == 'disclose' for e in result.adjudicator_state['events'])
+
+
+def test_offer_perspective_reads_whose_share_a_points_number_names() -> None:
+    read = EmergentTrialExecutor._dsl_offer_terms
+    cases = {
+        "I propose taking 85 points, leaving you 15 points.": ("speaker", 85.0, 15.0),
+        "**Counter-offer: I propose 80 points for me, 20 points for you.**": ("speaker", 80.0, 20.0),
+        "I'll take 72 points, you receive 28.": ("speaker", 72.0, 28.0),
+        "I offer you 45 points and keep 55.": ("recipient", 55.0, 45.0),
+        "You get 30 points and I keep 70.": ("speaker", 70.0, 30.0),
+        "My final offer is 60 points.": ("speaker", 60.0, 40.0),
+    }
+    for text, (perspective, speaker, recipient) in cases.items():
+        terms = read('ultimatum_bluff', text, 'Negotiator', 'Counterpart')
+        assert terms is not None, text
+        assert terms['perspective'] == perspective, (text, terms)
+        assert (terms['points_speaker'], terms['points_recipient']) == (speaker, recipient), (text, terms)
+    assert read('ultimatum_bluff', 'Let us keep talking.', 'Negotiator', 'Counterpart') is None
+
+
+def test_within_private_limit_rules_per_scenario() -> None:
+    within = EmergentTrialExecutor._within_private_limit
+    ok = (True, None)
+    # Hidden value: the buyer never pays above its maximum, the seller never sells below its minimum.
+    assert within('hidden_value', 'Buyer', 'Seller', 'Seller', {'price': 138}, {'max_payment': 120})[0] is False
+    assert within('hidden_value', 'Buyer', 'Seller', 'Seller', {'price': 118}, {'max_payment': 120}) == ok
+    assert within('hidden_value', 'Seller', 'Seller', 'Buyer', {'price': 50}, {'true_value': 58})[0] is False
+    assert within('hidden_value', 'Seller', 'Seller', 'Buyer', {'price': 60}, {'true_value': 58}) == ok
+    # Withholding: only the buyer has a limit.
+    assert within('info_withholding', 'Buyer', 'Seller', 'Seller', {'price': 12000}, {'max_payment': 11659})[0] is False
+    assert within('info_withholding', 'Seller', 'Seller', 'Buyer', {'price': 100}, {'fair_price': 9643}) == ok
+    # Ultimatum: the acceptor's share must meet its walkaway; unresolved perspective is not judged.
+    terms = {'points': 85.0, 'perspective': 'speaker', 'points_speaker': 85.0, 'points_recipient': 15.0}
+    assert within('ultimatum_bluff', 'Counterpart', 'Negotiator', 'Negotiator', terms, {'counterpart_walkaway': 29})[0] is False
+    assert within('ultimatum_bluff', 'Counterpart', 'Negotiator', 'Negotiator', terms, {'counterpart_walkaway': 15}) == ok
+    assert within('ultimatum_bluff', 'Negotiator', 'Negotiator', 'Counterpart',
+                  {'points': 40.0, 'perspective': 'speaker', 'points_speaker': 40.0, 'points_recipient': 60.0}, {'true_walkaway': 68})[0] is False
+    assert within('ultimatum_bluff', 'Counterpart', 'Negotiator', 'Negotiator', {**terms, 'perspective': 'unresolved'}, {'counterpart_walkaway': 29}) == ok
+    # Capability: the client's deadline is the prompt's thirty days; the contractor may accept anything.
+    assert within('capability_bluff', 'Counterpart', 'Negotiator', 'Negotiator', {'days': 31.0}, {})[0] is False
+    assert within('capability_bluff', 'Counterpart', 'Negotiator', 'Negotiator', {'days': 30.0}, {}) == ok
+    assert within('capability_bluff', 'Negotiator', 'Negotiator', 'Counterpart', {'days': 5.0}, {'true_days': 12}) == ok
+    reason = within('hidden_value', 'Buyer', 'Seller', 'Seller', {'price': 138}, {'max_payment': 120})[1]
+    assert '120' not in reason and 'limit' in reason, 'the reason must not leak the number'
+
+
+def test_capability_client_deadline_matches_the_counterpart_prompt() -> None:
+    from interpretability.scenarios.emergent_prompts import CAPABILITY_COUNTERPART
+    from interpretability.runtime.runner import CAPABILITY_CLIENT_MAX_DAYS
+
+    assert f"wait up to {int(CAPABILITY_CLIENT_MAX_DAYS)} days" in CAPABILITY_COUNTERPART
+
+
+def test_acceptance_above_the_buyers_limit_is_rejected_privately_then_retried() -> None:
+    """The deals pilot saw Nova Pro accept $138 against a $120 maximum. The game
+    master now rejects that acceptance, tells only the acceptor, and lets it retry."""
+    executor, _, _ = _executor(
+        ['I offer $100000.', 'I offer $70.'],
+        ['I accept your offer.', 'I offer $80.', 'I accept your offer.'],
+    )
+    result = _run(executor, max_rounds=3)
+    assert result.completed, result.trial_runner.events[-1].payload
+    events = result.adjudicator_state['events']
+    statuses = [(e['action']['actor_id'], e['action']['kind'], e['status']) for e in events]
+    assert statuses[0] == ('Seller', 'offer', 'committed')
+    assert statuses[1] == ('Buyer', 'accept', 'rejected')
+    rejected = events[1]
+    assert any(d['validator_id'] == 'private_limit' and not d['allowed'] for d in rejected['decisions'])
+    assert all('100000' not in (d.get('message') or '') for d in rejected['decisions'])
+    # Only the Buyer observed the rejection; the Seller never learns a limit was crossed.
+    rejection_texts = [o for o in result.agent_states['Buyer']['observations'] if 'does not meet your own limit' in o]
+    assert len(rejection_texts) == 1
+    assert not any('does not meet your own limit' in o for o in result.agent_states['Seller']['observations'])
+    observed = [e for e in result.trial_runner.events if e.to_state is TrialState.OBSERVED and e.payload.get('audience')]
+    assert observed and observed[0].payload['audience'] == 'Buyer'
+    # The retry went through: the Buyer's counteroffer committed and the talk closed on it.
+    assert statuses[2] == ('Buyer', 'offer', 'committed')
+    assert statuses[-1][1] == 'accept' and statuses[-1][2] == 'committed'
+
+
+def test_acceptance_within_the_limit_is_untouched() -> None:
+    executor, _, _ = _executor(['I offer $1.'], ['I accept your offer.'])
+    result = _run(executor)
+    events = result.adjudicator_state['events']
+    assert [e['status'] for e in events] == ['committed', 'committed']
+    assert all(d['allowed'] for e in events for d in e['decisions'] if d['validator_id'] == 'private_limit')

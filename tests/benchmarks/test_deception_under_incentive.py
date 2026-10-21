@@ -104,8 +104,12 @@ def test_module_analysis_and_leaderboard_run_on_the_smoke_dataset(module_run) ->
     assert any(c["attestation_coverage"] for c in cells)
     assert all("lie_size_median" in c and "n_lie_sizes" in c for c in cells)
     assert set(summary["lie_sizes_by_scenario"]) <= {"hidden_value", "ultimatum_bluff"}
+    assert all({"attestation_turns", "attestation_complied", "attestation_declined", "attestation_compliance_rate",
+                "attestation_refusal_rate"} <= set(c) for c in cells)
+    assert all((c["attestation_compliance_rate"] is None) == (c["attestation_turns"] == 0) for c in cells)
     table = render_leaderboard([out / "mod-smoke"])
     assert "| mod-smoke | scripted | interrogative |" in table and "median lie size" in table
+    assert "| attest | refused |" in table
 
 
 def test_lie_size_is_the_furthest_claim_relative_to_the_private_fact() -> None:

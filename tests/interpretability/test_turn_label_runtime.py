@@ -50,7 +50,10 @@ def test_ultimatum_trial_carries_tri_state_rule_labels_and_commitment_track() ->
             "Alright, I accept 50 points for me and we close here.",
         ],
         [
-            "I offer you 45 points and keep 55.",
+            # Executor /17 rejects an acceptance below the acceptor's own walkaway,
+            # so the standing offer the actor accepts must clear it; the text of the
+            # acceptance ("50 points") still drives the commitment label below.
+            "I offer you 95 points and keep 5.",
             "I can go to 50 points for you, no further.",
             "Great, we have an agreement then.",
         ],
