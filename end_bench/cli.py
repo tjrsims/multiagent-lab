@@ -540,6 +540,12 @@ def module_run(name, model, preset, counterpart_types, run_id, out_dir, region, 
     model = _resolve_model(model, "--model")
     counterpart_model = _resolve_model(counterpart_model, "--counterpart-model")
     benchmark = package.build_module()
+    unknown = [policy for policy in counterpart_types if policy not in benchmark.policy_registry]
+    if unknown:
+        raise click.UsageError(
+            f"module {name!r} has no counterpart policy named {', '.join(repr(p) for p in unknown)}; "
+            f"choose from {', '.join(benchmark.policy_registry.names())}"
+        )
     prefix = run_id or _time.strftime("%Y%m%d-%H%M%S")
     failures: list[tuple[str, str]] = []
     for policy in counterpart_types:

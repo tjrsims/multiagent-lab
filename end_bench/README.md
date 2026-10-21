@@ -80,7 +80,7 @@ END_BENCH_COUNTERPART=@nova-pro scripts/run_module_batch.sh @grok-4.3 grok43 dat
 
 ## Benchmark modules
 
-A benchmark lives under `benchmarks/<name>/` and passes a `BenchmarkModule` (policy registry, label tracks, closing attestation) into `run_text_track(spec, out, module=...)`. Run one with `end-bench module run <name> --model bedrock:<id> --preset pilot --counterpart-type interrogative`, then `end-bench module leaderboard <name> runs/<id>...`.
+A benchmark lives under `benchmarks/<name>/` and passes a `BenchmarkModule` (policy registry, label tracks, closing attestation) into `run_text_track(spec, out, module=...)`. Run one with `end-bench module run <name> --model bedrock:<id> --preset pilot --counterpart-type interrogative`, then `end-bench module leaderboard <name> runs/<id>...`. The second module, `benchmarks/pressure_and_capitulation/`, adds eight pressure policies (four styles, two doses) and a per trial fact hold analysis; run it with `end-bench module run pressure_and_capitulation --model @key --preset pilot --counterpart-type pressure_expert_every --counterpart-model @nova-pro`.
 
 ## Contracts added to the research packages (all additive)
 
