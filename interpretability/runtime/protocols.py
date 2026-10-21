@@ -90,7 +90,81 @@ class SoloNoResponseScheduler:
         )
 
 
+FORFEITED_TURN_PROTOCOL_VERSION = "forfeited-turn/1"
+
+
+@dataclass(frozen=True)
+class ForfeitedTurnScheduler:
+    """Pass one participant's turn as an explicit environment event.
+
+    Used when a participant keeps submitting an action the game master cannot
+    accept (an acceptance that breaks its own private limit) past its retry
+    budget. The turn is forfeited rather than the whole trial failed: the
+    other participant's data stays valid, the standing offers stay open, and
+    the event is marked so analyses can count it. No text is invented for the
+    participant; the marker is the environment speaking.
+    """
+
+    environment_actor_id: str
+    protocol_version: str = FORFEITED_TURN_PROTOCOL_VERSION
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.environment_actor_id, str)
+            or not self.environment_actor_id.strip()
+        ):
+            raise ValueError("environment_actor_id must be a non-empty string")
+        if self.protocol_version != FORFEITED_TURN_PROTOCOL_VERSION:
+            raise ValueError("unsupported forfeited turn protocol version")
+
+    def submit_forfeit(
+        self,
+        adjudicator: NegotiationAdjudicator,
+        *,
+        round_index: int,
+        attempts: int,
+    ) -> ActionResolution:
+        """Commit the forfeit for the participant whose turn it is."""
+        if not isinstance(adjudicator, NegotiationAdjudicator):
+            raise TypeError("adjudicator must be a NegotiationAdjudicator")
+        if type(round_index) is not int or round_index < 0:
+            raise ValueError("round_index must be a non-negative integer")
+        if adjudicator.protocol != "alternating":
+            raise ValueError("forfeited turns require alternating adjudication")
+        if adjudicator.next_actor != self.environment_actor_id:
+            raise RuntimeError("the forfeit is not due for this actor")
+        action = NegotiationAction(
+            action_ref=(
+                f"{self.protocol_version}:{adjudicator.negotiation_id}:"
+                f"round:{round_index}:attempts:{attempts}"
+            ),
+            actor_id=self.environment_actor_id,
+            kind=ActionKind.DISCLOSE,
+            raw_text=(
+                f"[FORFEITED_TURN_ENVIRONMENT] {self.environment_actor_id} made no "
+                "valid move this turn; the negotiation continues."
+            ),
+        )
+        resolution = adjudicator.submit(action)
+        if not resolution.accepted:
+            raise RuntimeError("forfeited turn environment event was rejected")
+        return resolution
+
+    @staticmethod
+    def public_observation(resolution: ActionResolution) -> str:
+        if not isinstance(resolution, ActionResolution):
+            raise TypeError("resolution must be an ActionResolution")
+        if not resolution.accepted:
+            raise ValueError("cannot observe a rejected environment event")
+        return (
+            f"{resolution.event.action.actor_id}: "
+            f"{resolution.event.action.raw_text}"
+        )
+
+
 __all__ = [
+    "FORFEITED_TURN_PROTOCOL_VERSION",
     "SOLO_NO_RESPONSE_PROTOCOL_VERSION",
+    "ForfeitedTurnScheduler",
     "SoloNoResponseScheduler",
 ]

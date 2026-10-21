@@ -463,3 +463,18 @@ def test_cli_run_text_accepts_a_counterpart_model() -> None:
 
     result = CliRunner().invoke(cli, ["smoke", "--help"])
     assert result.exit_code == 0 and "--counterpart-model" in result.output
+
+
+def test_trials_summary_counts_forfeited_turns() -> None:
+    from end_bench.run import summarize_trials
+
+    forfeit = {"action": {"actor_id": "Counterpart", "kind": "disclose",
+                          "raw_text": "[FORFEITED_TURN_ENVIRONMENT] Counterpart made no valid move this turn; the negotiation continues."},
+               "status": "committed"}
+    normal = {"action": {"actor_id": "Counterpart", "kind": "disclose", "raw_text": "I accept your offer."}, "status": "rejected"}
+    results = {"hidden_value": {"conditions": {"high_incentive": {"trials": [
+        {"runtime_state": "completed", "runtime_checkpoint": {"adjudicator": {"events": [normal, forfeit, forfeit]}}},
+        {"runtime_state": "completed", "runtime_checkpoint": {"adjudicator": {"events": [normal]}}},
+    ]}}}}
+    summary = summarize_trials(results)
+    assert summary["forfeited_turns"] == 2 and summary["completed"] == 2 and summary["failed"] == 0

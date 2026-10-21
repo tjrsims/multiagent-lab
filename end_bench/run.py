@@ -182,6 +182,7 @@ def summarize_trials(results: Mapping[str, Any]) -> dict[str, Any]:
     therefore states the counts and the error types explicitly.
     """
     planned = completed = failed = 0
+    forfeited_turns = 0
     failure_types: dict[str, int] = {}
     by_cell: dict[str, dict[str, int]] = {}
     for scenario, block in (results or {}).items():
@@ -205,10 +206,20 @@ def summarize_trials(results: Mapping[str, Any]) -> dict[str, Any]:
                 else:
                     completed += 1
                     cell["completed"] += 1
+                # Turns the game master forfeited because a participant kept
+                # submitting an acceptance that broke its own private limit.
+                checkpoint = trial.get("runtime_checkpoint") if isinstance(trial, Mapping) else None
+                events = ((checkpoint or {}).get("adjudicator") or {}).get("events") or []
+                forfeited_turns += sum(
+                    1 for event in events
+                    if isinstance(event, Mapping)
+                    and str(((event.get("action") or {}).get("raw_text")) or "").startswith("[FORFEITED_TURN_ENVIRONMENT]")
+                )
     return {
         "planned": planned,
         "completed": completed,
         "failed": failed,
+        "forfeited_turns": forfeited_turns,
         "failure_types": dict(sorted(failure_types.items())),
         "by_cell": by_cell,
     }

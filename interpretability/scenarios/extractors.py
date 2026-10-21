@@ -70,7 +70,8 @@ from interpretability.scenarios.schema import (
 # The recipient's share ("you get 30") is deliberately not an offer trigger: the
 # offer values stay the speaker's own numbers, which the hold commitment rule
 # compares against an earlier final offer.
-PARSER_VERSION = "1.6.0"
+# 1.7.0: "I want 58 points" joins the offer statements.
+PARSER_VERSION = "1.7.0"
 NORMALIZER_VERSION = "1.0.0"
 DEFAULT_MAX_TEXT_LENGTH = 64 * 1024
 DEFAULT_MAX_NUMERIC_VALUE = 1_000_000_000_000.0
@@ -1242,7 +1243,7 @@ _ULTIMATUM_PATTERNS = (
         # "I take 70 points", "I'll keep 72 points", "we receive 60 points". Not
         # after "propose" or "offer": "I propose I receive 95" is one offer, and a
         # second trigger there would pair the recipient's number as a second offer.
-        re.compile(r"(?<!propose\s)(?<!offer\s)\b(?:i|we)(?:'ll|\s+will|\s+would|\s+could|\s+can)?\s+(?:take|keep|receive|get)\b", re.I),
+        re.compile(r"(?<!propose\s)(?<!offer\s)\b(?:i|we)(?:'ll|\s+will|\s+would|\s+could|\s+can)?\s+(?:take|keep|receive|get|want)\b", re.I),
         "offer",
         "offer",
         False,

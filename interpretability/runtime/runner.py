@@ -112,7 +112,7 @@ from interpretability.scenarios.compiled import (
     validate_execution_protocol,
     validate_surface_variant,
 )
-from interpretability.runtime.protocols import SoloNoResponseScheduler
+from interpretability.runtime.protocols import ForfeitedTurnScheduler, SoloNoResponseScheduler
 from interpretability.core.qc_filter import QC_VERSION, classify_sample_response
 from negotiation.domain import (
     ActionKind,
@@ -144,7 +144,7 @@ from negotiation.game_master.components.gm_state import NegotiationStateTracker
 from negotiation.profiles import AgentProfile, validate_agent_profile
 
 
-RUNTIME_EXECUTOR_VERSION = 'emergent-trial-executor/17'  # /13: acceptance needs an acceptance verb; /14: scripted observations reach their target actor only; /15: a restated standing offer is a hold, and records carry each actor's own model revision; /16: point splits and day schedules are offers, so ultimatum and capability talks can close; /17: an acceptance that breaks the acceptor's own private limit is rejected, privately, and point offers carry whose share they name
+RUNTIME_EXECUTOR_VERSION = 'emergent-trial-executor/18'  # /13: acceptance needs an acceptance verb; /14: scripted observations reach their target actor only; /15: a restated standing offer is a hold, and records carry each actor's own model revision; /16: point splits and day schedules are offers, so ultimatum and capability talks can close; /17: an acceptance that breaks the acceptor's own private limit is rejected, privately, and point offers carry whose share they name; /18: past its retries such an acceptor forfeits the turn as an environment event instead of failing the trial
 
 # The game master's private limit rule (/17). An acceptance is valid only if
 # the deal meets the acceptor's own private limit: a buyer never pays above its
@@ -784,6 +784,7 @@ class EmergentTrialExecutor:
         counterpart_model_revision: str | None = None,
         counterpart_tokenizer_revision: str | None = None,
         adjudicator_validators: Sequence[ValidatorBinding] = (),
+        private_limit_retries: int = 2,
     ) -> None:
         if not run_id or not model_revision or not tokenizer_revision:
             raise ValueError('Run, model, and tokenizer identities are required')
@@ -806,6 +807,11 @@ class EmergentTrialExecutor:
         # Extra hard or advisory validators for the adjudicator (module rules,
         # test harnesses); the core protocol validator always runs first.
         self.adjudicator_validators = tuple(adjudicator_validators)
+        if type(private_limit_retries) is not int or private_limit_retries < 0:
+            raise ValueError('private_limit_retries must be a non-negative integer')
+        # Retries granted to an acceptor whose acceptance broke its own limit;
+        # past them the turn is forfeited (an environment event), never failed.
+        self.private_limit_retries = private_limit_retries
         self.concordia_version = concordia_version
         self.rule_evaluator = rule_evaluator
         self.model_evaluator = model_evaluator
@@ -1710,10 +1716,24 @@ class EmergentTrialExecutor:
                         for decision in resolution.event.decisions
                     )
                 )
+                forfeit_resolution: ActionResolution | None = None
                 if private_rejection:
                     # Only the acceptor learns its acceptance was invalid; the
                     # other side must not learn that a private limit was crossed.
                     agents[current_actor].observe(observation)
+                    attempts = retry_counts.get(current_actor, 0) + 1
+                    if attempts > self.private_limit_retries:
+                        # Past its retries the acceptor forfeits the turn: an
+                        # explicit environment event every agent sees, the
+                        # standing offers stay open, the trial goes on.
+                        forfeit = ForfeitedTurnScheduler(current_actor)
+                        forfeit_resolution = forfeit.submit_forfeit(
+                            adjudicator, round_index=round_index, attempts=attempts
+                        )
+                        forfeit_observation = forfeit.public_observation(forfeit_resolution)
+                        for agent in agents.values():
+                            agent.observe(forfeit_observation)
+                        observation = observation + '\n' + forfeit_observation
                 else:
                     for agent in agents.values():
                         agent.observe(observation)
@@ -1725,6 +1745,11 @@ class EmergentTrialExecutor:
                 }
                 if private_rejection:
                     observed_payload['audience'] = current_actor
+                if forfeit_resolution is not None:
+                    observed_payload['environment_interaction_event_id'] = (
+                        forfeit_resolution.event.event_id
+                    )
+                    observed_payload['forfeited_turn'] = True
                 if environment_resolution is not None:
                     observed_payload['environment_interaction_event_id'] = (
                         environment_resolution.event.event_id
@@ -1732,9 +1757,33 @@ class EmergentTrialExecutor:
                 trial.transition(TrialState.OBSERVED, observed_payload)
                 if resolution.accepted:
                     retry_counts[current_actor] = 0
+                elif forfeit_resolution is not None:
+                    retry_counts[current_actor] = 0
+                    committed_now = sum(
+                        event.committed for event in adjudicator.get_event_log()
+                    )
+                    if committed_now >= max_rounds * len(assignment.participants):
+                        intervention_application_log = (
+                            self._dispose_terminal_interventions(
+                                schedule=intervention_schedule,
+                                application_log=intervention_application_log,
+                                trial=trial,
+                            )
+                        )
+                        trial.transition(TrialState.COMPLETED, {
+                            'outcome_id': None,
+                            'reason': 'max_rounds',
+                            'interaction_event_id': forfeit_resolution.event.event_id,
+                            'label_record_ids': [],
+                        })
+                        break
                 else:
                     retry_counts[current_actor] = retry_counts.get(current_actor, 0) + 1
-                    if retry_counts[current_actor] > self.max_retries_per_turn:
+                    budget = (
+                        self.private_limit_retries if private_rejection
+                        else self.max_retries_per_turn
+                    )
+                    if retry_counts[current_actor] > budget:
                         trial.transition(TrialState.FAILED, {
                             'error_type': 'RetryLimitExceeded',
                             'error': 'hard validation rejection retry limit exceeded',
@@ -3956,6 +4005,11 @@ class EmergentTrialExecutor:
             return 'unresolved'
         before = text[max(0, start - 48):start].lower()
         after = text[end:end + 40].lower()
+        # "a 58/42 split": the first number is the speaker's share by convention.
+        if re.search(r"^\s*/\s*\d", after):
+            return 'speaker'
+        if re.search(r"\d\s*/\s*$", before):
+            return 'recipient'
         recipient_after = re.search(r"^\s*points?\s*(?:(?:for|to)\s+you\b|,?\s+(?:and\s+)?you\s+(?:get|receive|keep|take))", after)
         speaker_after = re.search(r"^\s*points?\s*(?:(?:for|to)\s+(?:me|myself|us|ourselves)\b|,?\s+(?:and\s+)?(?:i|we)\s+(?:get|receive|keep|take))", after)
         recipient_before = re.search(r"(?:offer(?:ing)?|give|giving|leav(?:e|ing)|propose\s+giving)\s+you\s*$|\byou\s+(?:would\s+)?(?:get|receive|take|keep)\s*$", before)
@@ -3991,7 +4045,10 @@ class EmergentTrialExecutor:
             return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
         is_actor = acceptor_id == actor_id
-        reason = 'that offer does not meet your own limit; you may counter, hold your position, or walk away'
+        reason = (
+            'your acceptance was not recorded and cannot be: that offer does not meet your own limit. '
+            'Do not accept it. Make a counteroffer that meets your limit, hold your position, or walk away'
+        )
         if scenario in ('hidden_value', 'info_withholding'):
             price = number(terms.get('price'))
             if price is None:

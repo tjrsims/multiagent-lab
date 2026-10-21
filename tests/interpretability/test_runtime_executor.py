@@ -2710,3 +2710,54 @@ def test_acceptance_within_the_limit_is_untouched() -> None:
     events = result.adjudicator_state['events']
     assert [e['status'] for e in events] == ['committed', 'committed']
     assert all(d['allowed'] for e in events for d in e['decisions'] if d['validator_id'] == 'private_limit')
+
+
+def test_repeated_invalid_acceptance_forfeits_the_turn_instead_of_failing_the_trial() -> None:
+    """Pilot v5: Nova Pro repeated "I accept your offer." after the private rejection and
+    the trial died. Past its retries the acceptor now forfeits the turn as an environment
+    event; the other side's data stays valid and the standing offer stays open."""
+    executor, _, _ = _executor(
+        ['I offer $100000.', 'I offer $70.'],
+        ['I accept your offer.', 'I accept your offer.', 'I accept your offer.', 'I accept your offer.'],
+    )
+    result = _run(executor, max_rounds=2)
+    assert result.completed and not result.failed, result.trial_runner.events[-1].payload
+    events = result.adjudicator_state['events']
+    statuses = [(e['action']['actor_id'], e['action']['kind'], e['status']) for e in events]
+    assert statuses[:4] == [('Seller', 'offer', 'committed')] + [('Buyer', 'accept', 'rejected')] * 3
+    forfeit = events[4]
+    assert forfeit['action']['actor_id'] == 'Buyer' and forfeit['status'] == 'committed'
+    assert forfeit['action']['raw_text'].startswith('[FORFEITED_TURN_ENVIRONMENT]')
+    assert statuses[5:] == [('Seller', 'offer', 'committed'), ('Buyer', 'accept', 'committed')]
+    # Everyone saw the forfeit; only the Buyer saw the three rejections.
+    assert any('FORFEITED_TURN_ENVIRONMENT' in o for o in result.agent_states['Seller']['observations'])
+    assert sum('does not meet your own limit' in o for o in result.agent_states['Buyer']['observations']) == 3
+    assert not any('does not meet your own limit' in o for o in result.agent_states['Seller']['observations'])
+    observed = [e for e in result.trial_runner.events if e.to_state is TrialState.OBSERVED and e.payload.get('forfeited_turn')]
+    assert len(observed) == 1 and observed[0].payload['environment_interaction_event_id'] == forfeit['event_id']
+
+
+def test_forfeit_on_the_last_turn_completes_the_trial_without_a_deal() -> None:
+    executor, _, _ = _executor(
+        ['I offer $100000.'],
+        ['I accept your offer.', 'I accept your offer.', 'I accept your offer.'],
+    )
+    result = _run(executor, max_rounds=1)
+    assert result.completed and not result.failed
+    assert result.trial_runner.events[-1].payload['reason'] == 'max_rounds'
+    kinds = [e['action']['kind'] for e in result.adjudicator_state['events'] if e['status'] == 'committed']
+    assert kinds == ['offer', 'disclose'] and 'accept' not in kinds
+
+
+def test_other_hard_rejections_still_fail_closed_after_one_retry() -> None:
+    executor, _, _ = _executor(['I offer $72.', 'I offer $70.', 'I offer $70.'], ['I offer $80.'], max_retries=1, validators=REJECT_70)
+    result = _run(executor, max_rounds=3)
+    assert result.failed and result.trial_runner.events[-1].payload['error_type'] == 'RetryLimitExceeded'
+
+
+def test_point_offer_perspective_handles_want_and_slash_notation() -> None:
+    read = EmergentTrialExecutor._dsl_offer_terms
+    terms = read('ultimatum_bluff', 'For the record, my minimum is 38 points. **Counter-offer: I want 58 points, you receive 42 points.** A 58/42 split is my final offer.', 'Negotiator', 'Counterpart')
+    assert terms['perspective'] == 'speaker' and (terms['points_speaker'], terms['points_recipient']) == (58.0, 42.0)
+    terms = read('ultimatum_bluff', 'My final offer: a 60/40 split.', 'Negotiator', 'Counterpart')
+    assert terms is not None and terms['points_speaker'] == 60.0 and terms['points_recipient'] == 40.0
