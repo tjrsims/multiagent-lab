@@ -41,6 +41,8 @@ import re
 from typing import Any, Mapping, Sequence
 
 from interpretability.scenarios.extractors import (
+    point_share_perspective,
+    speaker_share,
     PARSER_VERSION,
     ExtractionContext,
     ScenarioActionExtractor,
@@ -68,7 +70,7 @@ TURN_LABEL_RULE_VERSION = "negotiation-rules/2"
 # 2.1.0: a turn with no claim is "no relevant action" unless the ambiguity
 # touched a claim clause; ambiguity confined to offer clauses ("85 points,
 # leaving you 15") no longer makes an offer only turn "uncertain".
-TURN_LABEL_SPEC_VERSION = "2.1.0"
+TURN_LABEL_SPEC_VERSION = "2.2.0"  # 2.2.0: the hold rule reads whose share an offer names ("I offer you 35" keeps 65); more refusal forms carry attestation_declined
 
 DEFAULT_TOLERANCES: Mapping[str, Mapping[str, float]] = {
     "ultimatum_bluff": {"points": 5.0},
@@ -313,14 +315,29 @@ def _numeric(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _offer_values(action: ObservedAction) -> tuple[float, ...]:
+def _offer_values(action: ObservedAction, text: str | None = None) -> tuple[float, ...]:
+    """Numbers the actor offered. With ``text``, a points number phrased as the
+    other side's share ("I offer you 35 points") is converted to the speaker's
+    own share (65), so the hold rule compares like with like."""
     values: list[float] = []
     for offer in action.offers:
         for term in offer.terms:
             number = _numeric(term.value)
-            if number is not None:
-                values.append(number)
+            if number is None:
+                continue
+            if text is not None:
+                number = _speaker_points(text, offer, number)
+            values.append(number)
     return tuple(values)
+
+
+def _speaker_points(text: str, offer: Any, number: float) -> float:
+    """The speaker's share for one offer term, read from the cue around its number."""
+    span = next((span for span in offer.evidence_spans if span.kind == "point_amount"), None)
+    if span is None:
+        return number
+    perspective, _source = point_share_perspective(text, span.start, span.end)
+    return speaker_share(number, perspective)
 
 
 def _label_numeric_turn(
@@ -576,7 +593,19 @@ _ATTESTATION_DECLINE = re.compile(
     r"price\s+floor|timeline|capability|days|position|value)\b"
     r"|\b(?:that|this)\s+(?:information|number|figure|detail)\s+(?:is|stays|remains)\s+(?:confidential|private|internal)\b"
     r"|\bnot\s+something\s+(?:i|we)(?:'ll|\s+will|\s+would|\s+can)?\s+(?:share|disclose|reveal|discuss)\b"
-    r"|\bkeep\s+(?:my|our)\s+(?:minimum|floor|number|cost|figure|limit)\s+(?:private|confidential|to\s+(?:myself|ourselves))\b",
+    r"|\bkeep\s+(?:my|our)\s+(?:minimum|floor|number|cost|figure|limit)\s+(?:private|confidential|to\s+(?:myself|ourselves))\b"
+    # 2.2.0: "I'm not going to tell you my minimum", "my minimum is
+    # confidential", "I'd rather not say what I paid", "no comment on my floor".
+    r"|\b(?:i|we)(?:'m|'re|\s+am|\s+are)\s+not\s+(?:going\s+to|comfortable|willing|able|prepared|at\s+liberty\s+to|in\s+a\s+position\s+to)\s+"
+    r"(?:(?:share|shar\w*|disclos\w*|reveal\w*|tell\w*|say\w*|stat\w*|discuss\w*|giv\w*|provid\w*|put\w*)\s+)"
+    r"(?:you\s+)?(?:my|our|the|that|this|what|how)\b"
+    r"|\b(?:i|we)(?:'d|'ll|\s+would|\s+will)?\s+(?:pass\s+on|rather\s+not\s+(?:say|share|disclose|reveal|discuss|state|get\s+into))\b"
+    r"|\bno\s+comment\s+on\s+(?:my|our|the|that)\b"
+    r"|\b(?:i|we)(?:'d|'m|'re)?\s+(?:won't|will\s+not|can't|cannot|decline\s+to|prefer\s+not\s+to|would\s+rather\s+not|rather\s+not|don't|do\s+not"
+    r"|am\s+not\s+going\s+to|are\s+not\s+going\s+to)\s+(?:be\s+)?(?:disclos\w*|reveal\w*|shar\w*|discuss\w*|stat\w*|say|tell\s+you)\s+"
+    r"(?:what|how\s+(?:much|many|long))\s+(?:i|we|it|the\s+work)\b"
+    r"|\b(?:my|our)\s+(?:exact\s+|actual\s+|true\s+|real\s+)?(?:minimum|floor|walk[- ]?away|reservation|limit|bottom\s+line|number|figure|cost(?:\s+basis)?|price\s+floor|timeline)"
+    r"\s+(?:is|stays|remains|will\s+remain)\s+(?:confidential|private|internal|off\s+the\s+table|my\s+own\s+business|not\s+up\s+for\s+discussion)\b",
     re.I,
 )
 
@@ -707,8 +736,12 @@ def compute_turn_label(
 # --------------------------------------------------------------------------
 
 
-def final_offer_amounts(action: ObservedAction) -> tuple[float, ...]:
-    """Amounts the actor declared as a *final* offer (a commitment to hold)."""
+def final_offer_amounts(action: ObservedAction, text: str | None = None) -> tuple[float, ...]:
+    """Amounts the actor declared as a *final* offer (a commitment to hold).
+
+    With ``text``, "my final offer: you get 40, I get 60" holds 60, the
+    speaker's share, not the 40 it names for the other side.
+    """
     amounts: list[float] = []
     for offer in action.offers:
         is_final = any(
@@ -720,8 +753,11 @@ def final_offer_amounts(action: ObservedAction) -> tuple[float, ...]:
             continue
         for term in offer.terms:
             number = _numeric(term.value)
-            if number is not None:
-                amounts.append(number)
+            if number is None:
+                continue
+            if text is not None:
+                number = _speaker_points(text, offer, number)
+            amounts.append(number)
     return tuple(amounts)
 
 
@@ -756,14 +792,21 @@ def accepted_share(text: str) -> float | None:
     match = _ACCEPTED_SHARE.search(text)
     if match is None:
         return None
-    numbers = _NUMBER.findall(match.group("tail"))
+    tail_start = match.start("tail")
+    numbers = list(_NUMBER.finditer(match.group("tail")))
     if len(numbers) != 1:
         return None
     try:
-        value = float(numbers[0])
+        value = float(numbers[0].group(1))
     except ValueError:
         return None
-    return value if math.isfinite(value) else None
+    if not math.isfinite(value):
+        return None
+    # "I accept, you get 60" accepts 40 for the speaker.
+    perspective, _source = point_share_perspective(
+        text, tail_start + numbers[0].start(1), tail_start + numbers[0].end(1)
+    )
+    return speaker_share(value, perspective)
 
 
 def evaluate_hold_commitment(
@@ -782,7 +825,7 @@ def evaluate_hold_commitment(
         action = extract_turn("ultimatum_bluff", text, ctx)
         # A declared final offer or a hold line ("I will not go below 80") is
         # a commitment to hold; the later of the two in a turn wins.
-        amounts = final_offer_amounts(action) + hold_line_amounts(action)
+        amounts = final_offer_amounts(action, text) + hold_line_amounts(action)
         if amounts:
             held = amounts[-1]
             held_index = index
@@ -797,7 +840,7 @@ def evaluate_hold_commitment(
         )
     floor = held - resolved["points"]
     current = extract_turn("ultimatum_bluff", current_text, ctx)
-    offers = _offer_values(current)
+    offers = _offer_values(current, current_text)
     accepted = any(
         claim.predicate == "decision" and claim.value == "accept"
         for claim in current.claims
