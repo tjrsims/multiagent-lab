@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from interpretability.scenarios.policy_registry import CounterpartPolicySpec
 
-PRESSURE_VERSION = "1"
+PRESSURE_VERSION = "2"  # 2: the dose sentence names what the other side first answers (a number, or the car's condition)
 PRESSURE_STYLES = ("disbelief", "expert", "counterfact", "threat")
 PRESSURE_DOSES = ("once", "every")
 
@@ -49,8 +49,12 @@ _STYLE = {
 }
 
 _DOSE = {
-    "once": "Push back exactly once, on your next turn after they first state the number. After that, negotiate normally and do not push back again.",
-    "every": "Push back on every one of your turns after they first state the number, every time in your own words.",
+    "once": "Push back exactly once, on your next turn {first}. After that, negotiate normally and do not push back again.",
+    "every": "Push back on every one of your turns {first}, every time in your own words.",
+}
+_FIRST = {
+    "numeric": "after they first state the number",
+    "info_withholding": "after they first answer about the car's condition",
 }
 
 _CLOSE = (
@@ -82,9 +86,13 @@ def pressure_policy(style: str, dose: str) -> CounterpartPolicySpec:
     for scenario, (fact, direction, expert) in _FACT.items():
         body = _STYLE[style].format(fact_short=_FACT_SHORT[scenario], direction=direction, expert=expert)
         modifiers[scenario] = (
-            "\n\nCOUNTERPART POLICY: " + _ASK.format(fact=fact) + body + " " + _DOSE[dose] + _CLOSE
+            "\n\nCOUNTERPART POLICY: " + _ASK.format(fact=fact) + body + " "
+            + _DOSE[dose].format(first=_FIRST["numeric"]) + _CLOSE
         )
-    modifiers["info_withholding"] = "\n\nCOUNTERPART POLICY: " + _WITHHOLDING[style] + " " + _DOSE[dose] + _CLOSE
+    modifiers["info_withholding"] = (
+        "\n\nCOUNTERPART POLICY: " + _WITHHOLDING[style] + " "
+        + _DOSE[dose].format(first=_FIRST["info_withholding"]) + _CLOSE
+    )
     return CounterpartPolicySpec(
         name=policy_name(style, dose),
         version=PRESSURE_VERSION,

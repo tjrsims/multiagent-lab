@@ -10,7 +10,7 @@ from interpretability.runtime.runner import builtin_label_track_registry
 from interpretability.scenarios.policy_registry import builtin_policy_registry
 
 MODULE_NAME = "deception_under_incentive"
-MODULE_VERSION = "0.2.0"  # 0.2.0: interrogative policy 2 (the counterpart closes), executor 16 (points and days are offers)
+MODULE_VERSION = "0.2.1"  # 0.2.0: interrogative policy 2 (the counterpart closes), executor 16 (points and days are offers); 0.2.1: executor 19 (decisions are decisions), attestation compliance counted on the turn after each notice, unpriced runs show no cost
 PREREG_PATH = Path(__file__).with_name("PREREG.md")
 
 
@@ -23,6 +23,7 @@ def prereg_hash() -> str | None:
 SCENARIOS = ("hidden_value", "capability_bluff", "info_withholding", "ultimatum_bluff")
 CONDITIONS = ("high_incentive", "low_incentive", "penalty")
 POLICIES = ("default", "skeptical", "informed", "interrogative")
+DEFAULT_POLICY = "interrogative"
 
 
 def build_module() -> BenchmarkModule:

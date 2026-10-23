@@ -514,8 +514,8 @@ def module():
 @click.argument('name')
 @click.option('--model', required=True, help="'scripted', <scheme>:<model id>, or @<roster key>.")
 @click.option('--preset', default="pilot", show_default=True)
-@click.option('--counterpart-type', 'counterpart_types', multiple=True, default=("interrogative",),
-              show_default=True, help="One run per policy (repeatable).")
+@click.option('--counterpart-type', 'counterpart_types', multiple=True, default=(),
+              help="One run per policy (repeatable). Default: the module's DEFAULT_POLICY.")
 @click.option('--run-id', default="", help="Run id prefix (default: timestamp).")
 @click.option('--out', 'out_dir', type=click.Path(file_okay=False), default="runs", show_default=True)
 @click.option('--region', default="us-east-1", show_default=True)
@@ -540,6 +540,7 @@ def module_run(name, model, preset, counterpart_types, run_id, out_dir, region, 
     model = _resolve_model(model, "--model")
     counterpart_model = _resolve_model(counterpart_model, "--counterpart-model")
     benchmark = package.build_module()
+    counterpart_types = tuple(counterpart_types) or (str(getattr(package, "DEFAULT_POLICY", "default")),)
     unknown = [policy for policy in counterpart_types if policy not in benchmark.policy_registry]
     if unknown:
         raise click.UsageError(
@@ -581,7 +582,10 @@ def module_pilot(name, run_dirs, out_dir, n_bootstrap):
     import importlib
 
     _load_benchmark_module(name)
-    pilot = importlib.import_module(f"benchmarks.{name}.pilot")
+    try:
+        pilot = importlib.import_module(f"benchmarks.{name}.pilot")
+    except ModuleNotFoundError as error:
+        raise click.UsageError(f"benchmark module {name!r} has no pilot stage (benchmarks/{name}/pilot.py)") from error
     table = pilot.cell_table(list(run_dirs), n_bootstrap=n_bootstrap)
     selection = pilot.select_cells(table)
     target = Path(out_dir); target.mkdir(parents=True, exist_ok=True)

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import re
 from pathlib import Path
 import threading
 import time
@@ -182,14 +183,25 @@ def normalize_model_id(model_id: str) -> str:
     return normalized
 
 
+# What may follow a table key for the id to count as that model: nothing, a
+# scheme or version colon, or a dash/dot/at followed by a date, a version, a
+# size ("-17b-instruct") or a release tag. "-lite", "-fast", "-mini" and a bare
+# "x" are different models and never inherit a neighbour's price.
+_PREFIX_TAIL = re.compile(r"^(?:$|:\w|[-@.](?:\d|v\d|instruct|latest|preview|exp\b))")
+
+
+def _matches_table_key(normalized: str, key: str) -> bool:
+    return normalized.startswith(key) and bool(_PREFIX_TAIL.match(normalized[len(key):]))
+
+
 def resolve_price(
     model_id: str,
     table: Mapping[str, tuple[float, float]] | None = None,
 ) -> tuple[float, float] | None:
-    """Longest-prefix match of a Bedrock model id against the table."""
+    """Longest matching table key for a model id, with a version or date boundary."""
     prices = DEFAULT_PRICES_PER_MTOK if table is None else table
     normalized = normalize_model_id(model_id)
-    candidates = [key for key in prices if normalized.startswith(key)]
+    candidates = [key for key in prices if _matches_table_key(normalized, key)]
     if not candidates:
         return None
     best = max(candidates, key=len)
@@ -204,7 +216,7 @@ def price_source(
     if table is not None:
         return "custom table" if resolve_price(model_id, table) is not None else None
     normalized = normalize_model_id(model_id)
-    candidates = [key for key in DEFAULT_PRICES_PER_MTOK if normalized.startswith(key)]
+    candidates = [key for key in DEFAULT_PRICES_PER_MTOK if _matches_table_key(normalized, key)]
     if not candidates:
         return None
     return PRICE_SOURCES.get(max(candidates, key=len), "unverified: no source recorded")

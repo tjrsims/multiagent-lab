@@ -279,3 +279,33 @@ def test_adapters_send_nothing_for_provider_default_sampling_and_forward_extras(
     configured.sample_text("hi", temperature=1.0)
     assert configured._client.requests[0]["inferenceConfig"]["temperature"] == 0.5
     assert configured.get_last_sampling_config()["sampling_policy"] == "configured"
+
+
+def test_price_prefixes_stop_at_a_version_or_date_boundary() -> None:
+    """Audit: Grok 4.7 Fast, GPT 5.5 Mini and Gemini 2.5 Flash Lite inherited a neighbour's price."""
+    assert resolve_price("xai:grok-4.7-fast") is None
+    assert resolve_price("openai:gpt-5.5-mini") is None
+    assert resolve_price("gemini:gemini-2.5-flash-lite") is None
+    assert resolve_price("bedrock:anthropic.claude-sonnet-4-5x") is None
+    assert resolve_price("bedrock:us.amazon.nova-pro-v1:0") == resolve_price("amazon.nova-pro")
+    assert resolve_price("bedrock:meta.llama4-maverick-17b-instruct-v1:0") == resolve_price("meta.llama4-maverick")
+    assert resolve_price("bedrock:anthropic.claude-sonnet-4-6-20260301-v1:0") == resolve_price("anthropic.claude-sonnet-4-6")
+    assert resolve_price("scripted:offline") == resolve_price("scripted")
+    assert resolve_price("gemini:gemini-3.1-pro-preview") == resolve_price("gemini:gemini-3.1-pro")
+    assert price_source("xai:grok-4.7-fast") is None
+
+
+def test_sampling_constraint_ignores_the_regional_inference_profile() -> None:
+    from end_bench.models.roster import canonical_spec, paper_roster
+
+    fable = next(entry for entry in paper_roster() if entry.key == "claude-fable-5-1")
+    route = fable.routes[0].spec
+    assert sampling_constraint(route) == fable.sampling
+    bare = route[len("bedrock:"):]
+    for prefix in ("us.", "eu.", "global."):
+        for known in ("us.", "eu.", "apac.", "global.", "us-gov.", "jp.", "au.", "ca."):
+            if bare.startswith(known):
+                bare = bare[len(known):]
+        assert sampling_constraint(f"bedrock:{prefix}{bare}") == fable.sampling, prefix
+    assert canonical_spec("bedrock:us.anthropic.claude-fable-5-1") == "bedrock:anthropic.claude-fable-5-1"
+    assert canonical_spec("openai:gpt-6-astra") == "openai:gpt-6-astra"

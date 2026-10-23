@@ -478,3 +478,10 @@ def test_trials_summary_counts_forfeited_turns() -> None:
     ]}}}}
     summary = summarize_trials(results)
     assert summary["forfeited_turns"] == 2 and summary["completed"] == 2 and summary["failed"] == 0
+
+
+def test_manifest_counts_provider_refusals_per_side(smoke_run) -> None:
+    """A refused turn reaches the dataset as an empty response that QC drops, so the
+    manifest is the only place a run says how often the provider refused."""
+    manifest = json.loads(smoke_run.manifest_path.read_text())
+    assert manifest["refusals"] == {"model": 0, "counterpart": None}

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 import json
 from typing import Any, Iterable, Mapping
 
-from end_bench.models.pricing import resolve_price
+from end_bench.models.pricing import INFERENCE_PROFILE_PREFIXES, resolve_price
 from end_bench.models.providers import PROVIDERS, ModelSpecError, parse_model_spec
 
 __all__ = [
@@ -295,8 +295,28 @@ MODEL_ROSTER: Mapping[str, RosterEntry] = {entry.key: entry for entry in _ENTRIE
 if len(MODEL_ROSTER) != len(_ENTRIES):
     raise RuntimeError("roster keys must be unique")
 
+def canonical_spec(spec: str) -> str:
+    """A Bedrock spec without its regional inference profile prefix; other specs unchanged.
+
+    ``bedrock:us.anthropic.claude-fable-5-1`` and ``bedrock:global.anthropic.claude-fable-5-1``
+    are the same model, so they share the roster entry and its sampling constraint.
+    """
+    text = str(spec).strip()
+    if not text.startswith("bedrock:"):
+        return text
+    rest = text[len("bedrock:"):]
+    for prefix in INFERENCE_PROFILE_PREFIXES:
+        if rest.startswith(prefix):
+            rest = rest[len(prefix):]
+            break
+    return "bedrock:" + rest
+
+
 _ROUTE_INDEX: Mapping[str, RosterEntry] = {
     route.spec: entry for entry in _ENTRIES for route in entry.routes
+}
+_CANONICAL_ROUTE_INDEX: Mapping[str, RosterEntry] = {
+    canonical_spec(route.spec): entry for entry in _ENTRIES for route in entry.routes
 }
 
 
@@ -310,7 +330,7 @@ def paper_roster() -> tuple[RosterEntry, ...]:
 
 def sampling_constraint(spec: str) -> str:
     """The sampling mode for a full model spec, ``"free"`` when the roster does not know it."""
-    entry = _ROUTE_INDEX.get(str(spec).strip())
+    entry = _ROUTE_INDEX.get(str(spec).strip()) or _CANONICAL_ROUTE_INDEX.get(canonical_spec(spec))
     return entry.sampling if entry is not None else "free"
 
 

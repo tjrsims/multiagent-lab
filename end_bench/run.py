@@ -403,6 +403,14 @@ def run_text_track(
         "dataset_hash": dataset["config"]["dataset_hash"],
         "text_dataset": dataset_path.name,
         "trials": trial_summary,
+        # Provider refusals (a refusal stop reason with HTTP 200) per side. The
+        # adapters count them; the refused turn itself reaches the dataset as
+        # an empty response that QC drops, so without this the run could not
+        # tell a refusing model from a silent one.
+        "refusals": {
+            "model": int(getattr(model, "refusals", 0) or 0),
+            "counterpart": (int(getattr(counterpart, "refusals", 0) or 0) if counterpart is not None else None),
+        },
     }
     manifest_path = target / "run_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True, default=str))
